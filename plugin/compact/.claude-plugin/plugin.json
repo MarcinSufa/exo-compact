@@ -1,0 +1,254 @@
+{
+  "name": "exo-compact",
+  "version": "4.9.0",
+  "description": "Fast, deterministic context compaction for Claude Code: a seed built from captured state instead of a model summary, plus local search over the compacted history.",
+  "author": {
+    "name": "Marcin Sufa"
+  },
+  "homepage": "https://github.com/MarcinSufa/exo-compact",
+  "repository": "https://github.com/MarcinSufa/exo-compact",
+  "license": "MIT",
+  "keywords": [
+    "compaction",
+    "context",
+    "memory",
+    "recall",
+    "claude-code"
+  ],
+  "userConfig": {
+    "recallEnabled": {
+      "type": "boolean",
+      "title": "Enable session recall",
+      "description": "Build and query a local, session-scoped history index.",
+      "default": true
+    },
+    "recallVectors": {
+      "type": "boolean",
+      "title": "Recall vectors",
+      "description": "Also embed the session index with a small local model (multilingual-e5-small on the CPU, nothing leaves the machine) so searches match by meaning. The first use installs about 280 MB into ~/.claude/exovault/recall-runtime in the background.",
+      "default": true
+    },
+    "retentionDays": {
+      "type": "number",
+      "title": "Retention in days",
+      "description": "Delete the recall index and the capture directory of a session untouched for this many days (checked at most once a day by the recall build worker; captures under a project's own .exovault are left alone). 30 matches Claude Code's default for keeping transcripts; 0 keeps everything. `node setup.cjs cleanup` runs the same retention by hand, with a dry run and a backup.",
+      "default": 30
+    },
+    "recallPluginRoot": {
+      "type": "string",
+      "title": "Recall plugin directory",
+      "description": "Absolute directory of this plugin, used to start the recall index worker. Empty falls back to CLAUDE_PLUGIN_ROOT.",
+      "default": ""
+    },
+    "interactiveOnly": {
+      "type": "boolean",
+      "title": "Interactive sessions only",
+      "description": "Leave -p runs, the SDK and any run started from inside another session on native compaction; terminal sessions and sessions started from the VS Code or Cursor extension count as interactive. On by default, so a plugin enabled globally does not change scripted runs; set false to use exo-compact in -p and SDK runs too. A return to native compaction under this option logs compact.fallback=interactive_only origin=compact entrypoint=<value>.",
+      "default": true
+    },
+    "notices": {
+      "type": "string",
+      "title": "Transcript notices",
+      "description": "quiet (default): an interactive session shows one summary line per cut and warnings only (fallback to native compaction, errors, a held brief); every other exo-compact line is written to notices.log in the session's capture directory. all: show every line in the transcript. -p and SDK runs always get every line.",
+      "default": "quiet"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "title": "Compaction timeout",
+      "description": "Maximum duration in milliseconds for the S4 compaction attempt.",
+      "default": 30000
+    },
+    "contract": {
+      "type": "string",
+      "title": "Project contract",
+      "description": "Project instructions to carry into the compacted context.",
+      "default": ""
+    },
+    "denseNotes": {
+      "type": "boolean",
+      "title": "Dense working notes",
+      "description": "Keep specific details from earlier user, assistant, and tool activity in the seed.",
+      "default": true
+    },
+    "realTokenCount": {
+      "type": "boolean",
+      "title": "Real token count",
+      "description": "Size the seed and the kept messages by an estimate of real tokens instead of characters / 4.",
+      "default": true
+    },
+    "taskCard": {
+      "type": "boolean",
+      "title": "Task card",
+      "description": "Keep a short task card written by the session's own model (a background fork as the context fills) and put it in the seed instead of the whole brief; once a card exists a cut keeps about 8000 tokens (seed + kept messages).",
+      "default": true
+    },
+    "sinceCard": {
+      "type": "boolean",
+      "title": "Since the card",
+      "description": "With a task card in the seed, list one line per tool call made after the card was written and before the kept messages (files written, commands run and their outcome), so the seed shows what the card does not. No model call; needs taskCard.",
+      "default": true
+    },
+    "lateCardRefresh": {
+      "type": "boolean",
+      "title": "Late task card refresh",
+      "description": "Refresh the task card a second time, in the background, at about 85% of the compaction window when it is more than 15 tool calls old, so the card at the cut is fresh; the card then also says how many tool calls it is behind the kept messages. One extra fork per cut cycle (a cost driver). Needs taskCard.",
+      "default": false
+    },
+    "recipes": {
+      "type": "boolean",
+      "title": "Recipes section",
+      "description": "Add a short Recipes section to the seed: the last run, test, build, verify and deploy commands that worked earlier in the session (with env var names, ports and background task ids; secrets redacted), so the session does not search for how it ran things. No model call; at most 8 lines, about 400 tokens. Over budget it gives way after the working notes and before the brief, the card and the rules.",
+      "default": true
+    },
+    "cutOnNewBrief": {
+      "type": "boolean",
+      "title": "Cut before a new task brief",
+      "description": "Before a new long task brief reaches the model, compact the completed task's history so the new brief starts whole with the seed. Short follow-ups and the first prompt of a session are left alone.",
+      "default": false
+    },
+    "workState": {
+      "type": "boolean",
+      "title": "Work state",
+      "description": "Keep the session directory, Git state, tasks, and background work in the seed.",
+      "default": true
+    },
+    "currentValues": {
+      "type": "boolean",
+      "title": "Current values",
+      "description": "Keep in the seed the newest value of each thing the user changed in a message (\"set X to 6\", \"X is now 11\"), without the earlier values.",
+      "default": true
+    },
+    "sessionMap": {
+      "type": "boolean",
+      "title": "Session map",
+      "description": "Put one line per earlier compaction segment (date, the user's asks, edited files, commits) in the seed, from the recall index; needs recallEnabled.",
+      "default": true
+    },
+    "cardTotalBudgetTokens": {
+      "type": "number",
+      "title": "Seed and tail budget with a task card",
+      "description": "Tokens for the seed plus the kept tail after a cut once a task card exists (tail 3/8, notes 1/8, seed the rest); about what native compaction keeps.",
+      "default": 8000
+    },
+    "totalBudgetTokens": {
+      "type": "number",
+      "title": "Seed and tail budget",
+      "description": "Tokens for the seed plus the kept tail after a cut; seed, dense notes and tail budgets scale from it. Counted as real tokens (20000 by default); with Real token count off it is characters / 4 and 13000 is the old default.",
+      "default": 20000
+    },
+    "taskBriefs": {
+      "type": "boolean",
+      "title": "Task briefs",
+      "description": "Save a long request (2,500+ characters) verbatim when it is sent and put its path and checklist in the seed; needs recallEnabled.",
+      "default": true
+    },
+    "fullBrief": {
+      "type": "boolean",
+      "title": "Whole brief in the seed",
+      "description": "Put the newest saved task brief in the seed whole and verbatim when it is at most 24,000 characters; the tokens it needs come out of the kept tail. Needs taskBriefs.",
+      "default": true
+    },
+    "briefCheck": {
+      "type": "boolean",
+      "title": "Brief check before stopping",
+      "description": "After a cut whose seed points at a saved task brief, block the main loop's first stop once with the brief lines about files, tests, checks, exact strings and frozen parts; needs taskBriefs.",
+      "default": false
+    },
+    "ruleCheck": {
+      "type": "boolean",
+      "title": "Rule check before stopping",
+      "description": "Sends the final message and the uncommitted diff to Jev (TYPESAFE_API_KEY) at every main-loop stop with a task card, and blocks once with the card rules Jev finds broken; a clean turn passes with nothing pasted. Its own opt-in, independent of jevEnabled; jevDenyList applies. Needs taskCard.",
+      "default": false
+    },
+    "briefPush": {
+      "type": "boolean",
+      "title": "Brief lines with each write after a cut",
+      "description": "After a cut whose seed points at a saved task brief, a call that writes a file (Write, Edit, or a Bash command that writes one) and a short message get the newest brief's lines for it as context, each line once per cut; a new brief turns it off until the next cut.",
+      "default": false
+    },
+    "sessionPush": {
+      "type": "boolean",
+      "title": "Earlier session lines with each message after a cut",
+      "description": "After a cut, each user message is searched in the session index line by line; transcript lines a compaction removed that share a rare name, id or code with the message go with it as context (at most 1,500 characters, each line once per cut). Needs recallEnabled.",
+      "default": true
+    },
+    "briefLimits": {
+      "type": "boolean",
+      "title": "Line-length check after each write",
+      "description": "After a write, the lines it added (git diff against HEAD, a new file whole) are checked against the line-length limit the newest saved task brief states (a tracked file that already had longer lines is skipped); only a broken limit adds a short note. Needs recallEnabled.",
+      "default": true
+    },
+    "briefDigestModel": {
+      "type": "string",
+      "title": "Brief checklist model",
+      "description": "Model alias for the background `claude -p` call that writes a saved brief's checklist (one call per brief). Used only with taskCard off: with the card on no checklist is written. Empty turns it off and the seed shows the brief's start.",
+      "default": "sonnet"
+    },
+    "workStateProbe": {
+      "type": "boolean",
+      "title": "Work state Git check",
+      "description": "Check Git status and worktrees at compaction time.",
+      "default": true
+    },
+    "adoptedFiles": {
+      "type": "boolean",
+      "title": "Adopted rules files",
+      "description": "Copy a rules file the user tells the model to read and follow when the request is sent, and quote it in every seed.",
+      "default": true
+    },
+    "toolOutputNotes": {
+      "type": "boolean",
+      "title": "Bash output notes",
+      "description": "Keep safe lines from Bash results in dense working notes. Off also keeps output text out of the Recipes lines.",
+      "default": true
+    },
+    "jevEnabled": {
+      "type": "boolean",
+      "title": "Enable selector J (Jev)",
+      "description": "Privacy rule (spec v3.4 §3.3, §privacy): J is off by default. Per-project opt-in; set true only for a project where sending span text to TypeSafe's Jev is acceptable. Also lets Jev rank session-search results (search_session sends the query and up to 20 redacted excerpts).",
+      "default": false
+    },
+    "jevDenyList": {
+      "type": "string",
+      "title": "Selector J deny list",
+      "description": "Comma-separated substrings of a project's cwd that keep J off even when jevEnabled is true (for example client repo path fragments). Matched against the session cwd.",
+      "default": ""
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Selector J model id",
+      "description": "The Jev model id requested for choice questions and checked in the response (K4: a mismatch maps to selector D).",
+      "default": "jev-latest"
+    },
+    "jevPerCallTimeoutMs": {
+      "type": "number",
+      "title": "Selector J per-call timeout",
+      "description": "Timeout in milliseconds for one Jev batch request; a batch that misses it falls back to selector D.",
+      "default": 4000
+    },
+    "jevTotalBudgetMs": {
+      "type": "number",
+      "title": "Selector J total budget",
+      "description": "Total time in milliseconds selector J may spend across every Jev call in one compaction; once spent, every remaining span falls back to selector D.",
+      "default": 10000
+    },
+    "jevDenseRerank": {
+      "type": "boolean",
+      "title": "Jev dense-note reranking",
+      "description": "When Jev is enabled, Jev re-ranks working-note candidates against the current work at each cut.",
+      "default": true
+    },
+    "jevDensePerCallTimeoutMs": {
+      "type": "number",
+      "title": "Jev dense-note request timeout",
+      "description": "Maximum duration in milliseconds for one dense-note reranking request.",
+      "default": 3000
+    },
+    "jevDenseTotalBudgetMs": {
+      "type": "number",
+      "title": "Jev dense-note total budget",
+      "description": "Maximum milliseconds spent on dense-note reranking at one compaction cut.",
+      "default": 5000
+    }
+  }
+}

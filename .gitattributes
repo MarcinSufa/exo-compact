@@ -1,0 +1,3 @@
+# Keep LF everywhere: a CRLF after the #!/usr/bin/env node shebang breaks vitest's transform on Windows
+# checkouts with core.autocrlf=true, and CRLF breaks the shell scripts.
+* text=auto eol=lf

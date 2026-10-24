@@ -1,0 +1,21 @@
+{
+  "name": "exo-compact",
+  "owner": {
+    "name": "Marcin Sufa"
+  },
+  "metadata": {
+    "description": "exo-compact: deterministic context compaction for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "exo-compact",
+      "source": "./plugin/compact",
+      "description": "Fast, deterministic compaction with local session recall"
+    },
+    {
+      "name": "exovault-s4-trigger",
+      "source": "./plugin/compact-trigger",
+      "description": "Optional, experimental soft-trigger companion for exo-compact"
+    }
+  ]
+}

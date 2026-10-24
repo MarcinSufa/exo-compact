@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "files": ["./.claude-plugin/types/claude-code/index.d.ts"]
+}

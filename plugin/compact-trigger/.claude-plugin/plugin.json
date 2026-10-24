@@ -1,0 +1,24 @@
+{
+  "name": "exovault-s4-trigger",
+  "version": "0.1.0",
+  "description": "Soft-trigger companion plugin for exo-compact: fires session.compact from turn.complete once context usage crosses the configured threshold. It is a separate plugin because Claude Code accepts only one hook module per plugin.",
+  "author": {
+    "name": "Marcin Sufa"
+  },
+  "homepage": "https://github.com/MarcinSufa/exo-compact",
+  "repository": "https://github.com/MarcinSufa/exo-compact",
+  "userConfig": {
+    "softThresholdPercent": {
+      "type": "number",
+      "title": "Soft compaction threshold",
+      "description": "Context usage percentage that triggers S4 compaction after a completed turn.",
+      "default": 60
+    },
+    "compactWindowTokens": {
+      "type": "number",
+      "title": "Compaction window",
+      "description": "Token size of the compaction window the soft threshold is measured against, independent of the model's actual context window.",
+      "default": 200000
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "recall": {
+      "command": "node",
+      "alwaysLoad": true,
+      "args": ["${CLAUDE_PLUGIN_ROOT}/recall/mcp-server.mjs"],
+      "env": {
+        "TYPESAFE_API_KEY": "${TYPESAFE_API_KEY:-}",
+        "EXO_JEV_URL": "${EXO_JEV_URL:-}",
+        "EXO_JEV_ENABLED": "${user_config.jevEnabled}",
+        "EXO_JEV_DENY_LIST": "${user_config.jevDenyList}",
+        "EXO_JEV_MODEL": "${user_config.jevModel}"
+      }
+    }
+  }
+}

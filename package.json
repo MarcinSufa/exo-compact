@@ -1,0 +1,35 @@
+{
+  "name": "exo-compact",
+  "version": "4.9.0",
+  "private": true,
+  "description": "Fast, deterministic context compaction for Claude Code: a seed built from captured state instead of a model summary, plus local search over the compacted history.",
+  "license": "MIT",
+  "author": "Marcin Sufa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarcinSufa/exo-compact.git"
+  },
+  "homepage": "https://github.com/MarcinSufa/exo-compact#readme",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "compaction",
+    "context-window",
+    "recall"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "vitest run plugin/compact plugin/compact-trigger tools/tree-eval/quiz-tree.test.mjs tools/tree-eval/tree.test.mjs && node --experimental-strip-types --no-warnings --test tools/real-replay/real-replay.test.mjs tools/real-replay/cloze.test.mjs tools/real-replay/quiz.test.mjs tools/status.test.mjs tools/reread-measure.test.mjs tools/eval/gate.test.mjs tools/task-ab/task-ab.test.mjs tools/launch/launch.test.mjs tools/public-tree.test.mjs tools/real-replay/quiz-cutid.test.mjs tools/tree-eval/tree-cutid.test.mjs tools/tree-eval/tree-due.test.mjs tools/tree-eval/tree-omitted.test.mjs tools/tree-eval/tree-order.test.mjs tools/install/install.test.mjs",
+    "typecheck": "tsc --noEmit -p plugin/compact && tsc --noEmit -p plugin/compact-trigger",
+    "typecheck:full": "tsc --noEmit -p plugin/compact/tsconfig.full.json && tsc --noEmit -p plugin/compact-trigger/tsconfig.full.json",
+    "status": "node tools/status.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "5.9.3",
+    "vitest": "4.0.18"
+  },
+  "engines": {
+    "node": ">=22.15"
+  }
+}

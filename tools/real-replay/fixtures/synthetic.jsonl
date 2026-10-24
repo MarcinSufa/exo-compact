@@ -1,0 +1,7 @@
+{"type":"user","sessionId":"synthetic-harbor","message":{"content":"Use `src/harbor.ts`; retry in 4 seconds. Keep exact phrase \"blue lantern\"."}}
+{"type":"assistant","sessionId":"synthetic-harbor","message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"src/harbor.ts"}}]}}
+{"type":"user","sessionId":"synthetic-harbor","message":{"content":[{"type":"tool_result","tool_use_id":"r1","content":"export const RETRY_MS = 4000;"}]}}
+{"type":"system","subtype":"compact_boundary","sessionId":"synthetic-harbor"}
+{"type":"user","isCompactSummary":true,"sessionId":"synthetic-harbor","message":{"content":"Earlier: `src/harbor.ts` uses RETRY_MS = 4000."}}
+{"type":"assistant","sessionId":"synthetic-harbor","message":{"content":[{"type":"tool_use","id":"r2","name":"Read","input":{"file_path":"src/harbor.ts"}}]}}
+{"type":"user","sessionId":"synthetic-harbor","message":{"content":[{"type":"tool_result","tool_use_id":"r2","content":"export const RETRY_MS = 4000;"}]}}

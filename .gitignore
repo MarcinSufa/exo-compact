@@ -1,0 +1,7 @@
+node_modules/
+.exovault/
+*.log
+tools/real-replay/*report*.json
+# Claude Code's own generated declarations: written beside the mod whenever Claude Code loads it, not redistributed.
+plugin/compact/types/cc.d.ts
+plugin/compact/.claude-plugin/types/

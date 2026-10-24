@@ -1,0 +1,16 @@
+{
+  "name": "exo-compact",
+  "version": "0.1.0",
+  "description": "S4 plugin test mutation",
+  "userConfig": {
+    "softThresholdPercent": { "type": "number", "title": "Threshold", "description": "Threshold", "default": 60 },
+    "timeoutMs": { "type": "number", "title": "Timeout", "description": "Timeout", "default": 30000 },
+    "contract": { "type": "string", "title": "Contract", "description": "Contract", "default": "" },
+    "gateForceTrigger": { "type": "string", "title": "Trigger", "description": "Trigger", "default": "" },
+    "jevEnabled": { "type": "boolean", "title": "Enable selector J", "description": "Enable selector J", "default": false },
+    "jevDenyList": { "type": "string", "title": "Deny list", "description": "Deny list", "default": "" },
+    "jevModel": { "type": "string", "title": "Model", "description": "Model", "default": "jev-latest" },
+    "jevPerCallTimeoutMs": { "type": "number", "title": "Per-call timeout", "description": "Per-call timeout", "default": 1500 },
+    "jevTotalBudgetMs": { "type": "number", "title": "Total budget", "description": "Total budget", "default": 10000 }
+  }
+}
