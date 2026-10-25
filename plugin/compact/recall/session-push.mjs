@@ -82,16 +82,16 @@ function readState(file) { try { const value = JSON.parse(fs.readFileSync(file, 
 
 /**
  * What one prompt gets, as the hook reads it (the CLI's stdout, or the recall server's answer, recall/push-server.mjs):
- * the found lines, or null. What was pushed is kept in `stateFile` and not repeated until the next cut, which takes it
- * out of context again. Past `deadline` (epoch ms; the hook has given up by then) the answer is null and nothing is
- * marked shown.
+ * the found lines, or null. The CLI keeps pushed lines in `stateFile`; the server returns their keys for the hook to
+ * save only after it uses the answer. Past `deadline` (epoch ms; the hook has given up by then) the answer is null and
+ * nothing is marked shown.
  */
-export function pushForPrompt(root, sessionId, prompt, stateFile, rare = Number(process.env.EXO_SESSION_PUSH_RARE) || SESSION_PUSH_RARE, deadline = Infinity) {
+export function pushForPrompt(root, sessionId, prompt, stateFile, rare = Number(process.env.EXO_SESSION_PUSH_RARE) || SESSION_PUSH_RARE, deadline = Infinity, saveState = true) {
   const state = stateFile ? readState(stateFile) : {};
   let found = sessionPush(root, sessionId, prompt, { rare });
   if (found && state.cuts === found.cuts && Array.isArray(state.shown)) found = sessionPush(root, sessionId, prompt, { rare, shown: state.shown });
   if (Date.now() > deadline) return null;
-  if (found && stateFile) {
+  if (found && stateFile && saveState) {
     const shown = state.cuts === found.cuts && Array.isArray(state.shown) ? state.shown : [];
     try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify({ cuts: found.cuts, shown: [...shown, ...found.lines.map((l) => l.key)] })); } catch {}
   }

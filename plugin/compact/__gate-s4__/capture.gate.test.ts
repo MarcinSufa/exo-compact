@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { access, lstat, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { loadImpl } from './impl.js';
 import { humanPrompt, assistantText, sha256 } from './fixtures/helpers.js';
 import type { SessionMessage } from '../core/types.js';
@@ -59,6 +63,86 @@ describe('capture persistence wiring', () => {
     }, '.exovault/s4-capture/session');
     await expect(store.appendRecords([{ kind: 'user', origin: 'turn', producedBy: 's4-capture', sourceHash: 'h', body: { text: 'new' } }], { identities: ['w'] })).rejects.toThrow('EIO');
     expect(contents.get(segment)).toBe('previous bytes');
+  });
+
+  it('re-lists once when a listed segment disappears during a directory rename, then writes the watermark', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'exo-capture-rename-'));
+    try {
+      const baseDir = path.join(root, '.exovault', 's4-capture', 'session');
+      const segment = path.join(baseDir, 'segment-000001.json');
+      const tombstone = path.join(root, '.exovault', '.session.retention-123-456-1');
+      mkdirSync(baseDir, { recursive: true });
+      writeFileSync(segment, JSON.stringify({ kind: 'user', sourceHash: 'old', body: { text: 'old' } }));
+      let firstRead = true;
+      let reads = 0;
+      let lists = 0;
+      const fs = {
+        read: async (file: string) => {
+          reads += 1;
+          if (file === segment && firstRead) {
+            firstRead = false;
+            await rename(baseDir, tombstone);
+            await mkdir(baseDir, { recursive: true });
+            throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+          }
+          return readFile(file, 'utf8');
+        },
+        write: async (file: string, text: string) => { await writeFile(file, text); },
+        exists: async (file: string) => { try { await access(file); return true; } catch { return false; } },
+        list: async (dir: string) => {
+          lists += 1;
+          return Promise.all((await readdir(dir, { withFileTypes: true })).map(async (entry) => ({
+            name: entry.name,
+            kind: entry.isDirectory() ? 'directory' : 'file',
+            size: (await lstat(path.join(dir, entry.name))).size,
+          })));
+        },
+      };
+      const store = makeFsCaptureStore(fs, baseDir);
+      await expect(store.appendRecords([{ kind: 'user', origin: 'turn', producedBy: 's4-capture', sourceHash: 'new', body: { text: 'new' } }], { identities: ['watermark'] })).resolves.toBeUndefined();
+      expect(reads).toBe(1);
+      expect(lists).toBe(2);
+      expect(JSON.parse(readFileSync(path.join(baseDir, 'segment-000001.json'), 'utf8'))).toMatchObject({ sourceHash: 'new' });
+      expect(JSON.parse(readFileSync(path.join(baseDir, 'watermark.json'), 'utf8'))).toEqual({ watermark: { identities: ['watermark'] } });
+      expect(readFileSync(path.join(tombstone, 'segment-000001.json'), 'utf8')).toContain('old');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('throws after one retry when every listed segment read is ENOENT and leaves the watermark unwritten', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'exo-capture-missing-'));
+    try {
+      const baseDir = path.join(root, '.exovault', 's4-capture', 'session');
+      const segment = path.join(baseDir, 'segment-000001.json');
+      mkdirSync(baseDir, { recursive: true });
+      writeFileSync(segment, 'previous bytes');
+      let reads = 0;
+      let lists = 0;
+      const writes: string[] = [];
+      const fs = {
+        read: async (file: string) => {
+          reads += 1;
+          if (file === segment) throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+          return readFile(file, 'utf8');
+        },
+        write: async (file: string, text: string) => { writes.push(file); await writeFile(file, text); },
+        exists: async (file: string) => { try { await access(file); return true; } catch { return false; } },
+        list: async (dir: string) => {
+          lists += 1;
+          return Promise.all((await readdir(dir, { withFileTypes: true })).map(async (entry) => ({
+            name: entry.name,
+            kind: entry.isDirectory() ? 'directory' : 'file',
+            size: (await lstat(path.join(dir, entry.name))).size,
+          })));
+        },
+      };
+      const store = makeFsCaptureStore(fs, baseDir);
+      await expect(store.appendRecords([{ kind: 'user', origin: 'turn', producedBy: 's4-capture', sourceHash: 'new', body: { text: 'new' } }], { identities: ['watermark'] })).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(reads).toBe(2);
+      expect(lists).toBe(2);
+      expect(writes).toEqual([]);
+      expect(existsSync(path.join(baseDir, 'watermark.json'))).toBe(false);
+      expect(readFileSync(segment, 'utf8')).toBe('previous bytes');
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('starts capture on the very first turn, when the capture directory does not exist yet (round 7 D2)', async () => {

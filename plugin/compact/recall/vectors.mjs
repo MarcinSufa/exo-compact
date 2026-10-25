@@ -17,12 +17,62 @@ export const DIM = 384;
 const KEY = 8, RECORD = KEY + DIM;
 const FILE = 'vectors-e5-small-q8.bin';
 const RETRY_INSTALL_MS = 24 * 3600 * 1000;
+const VECTOR_LOCK_WAIT_MS = 2000, VECTOR_LOCK_STALE_MS = 30_000, VECTOR_LOCK_POLL_MS = 10;
+const vectorLockWaiter = new Int32Array(new SharedArrayBuffer(4));
 // e5 is trained with these prefixes; without them the cosines are much flatter.
 export const PASSAGE = 'passage: ', QUERY = 'query: ';
 
 export const runtimeDir = (recallRoot) => path.join(path.dirname(path.resolve(recallRoot)), 'recall-runtime');
 export const vectorFile = (sessionDir) => path.join(sessionDir, FILE);
 export const textKey = (text) => crypto.createHash('sha256').update(text).digest().subarray(0, KEY).toString('hex');
+
+// 4.9.1: vector appends and redaction drops share a bounded per-index lock; locks older than 30 seconds are taken over.
+export function takeVectorLock(dir) {
+  if (!fs.existsSync(dir)) return null;
+  const file = path.join(dir, 'VECTOR_LOCK');
+  const until = Date.now() + VECTOR_LOCK_WAIT_MS;
+  for (;;) {
+    if (Date.now() >= until) return null;
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx', mode: 0o600 });
+      const owned = fs.statSync(file);
+      return () => {
+        try {
+          const current = fs.statSync(file);
+          if (current.dev === owned.dev && current.ino === owned.ino && fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.unlinkSync(file);
+        } catch {}
+      };
+    } catch {
+      if (!fs.existsSync(dir)) return null;
+      let holder = 0, observed;
+      try { observed = fs.statSync(file); holder = Number(fs.readFileSync(file, 'utf8').trim()); }
+      catch {
+        const remaining = until - Date.now();
+        if (remaining <= 0) return null;
+        Atomics.wait(vectorLockWaiter, 0, 0, Math.min(VECTOR_LOCK_POLL_MS, remaining));
+        continue;
+      }
+      const stale = Date.now() - observed.mtimeMs >= VECTOR_LOCK_STALE_MS;
+      if (stale || !holder || !pidAlive(holder)) {
+        let removed = false;
+        try {
+          const current = fs.statSync(file), currentHolder = Number(fs.readFileSync(file, 'utf8').trim());
+          if (current.dev === observed.dev && current.ino === observed.ino && current.mtimeMs === observed.mtimeMs && currentHolder === holder &&
+            (Date.now() - current.mtimeMs >= VECTOR_LOCK_STALE_MS || !currentHolder || !pidAlive(currentHolder))) { fs.unlinkSync(file); removed = true; }
+        } catch {}
+        if (!removed) {
+          const remaining = until - Date.now();
+          if (remaining <= 0) return null;
+          Atomics.wait(vectorLockWaiter, 0, 0, Math.min(VECTOR_LOCK_POLL_MS, remaining));
+        }
+        continue;
+      }
+      const remaining = until - Date.now();
+      if (remaining <= 0) return null;
+      Atomics.wait(vectorLockWaiter, 0, 0, Math.min(VECTOR_LOCK_POLL_MS, remaining));
+    }
+  }
+}
 
 // Machine-wide cap on embedding: a session's worker takes one of EMBED_SLOTS pid files under the recall root before
 // it loads the model, so any number of sessions embed on at most EMBED_SLOTS x EMBED_THREADS cores (and as many
@@ -123,16 +173,51 @@ export function storedKeys(file) {
   return keys;
 }
 
-export function appendVectors(file, items) {
-  const buf = Buffer.alloc(items.length * RECORD);
-  items.forEach(({ key, vector }, n) => {
-    const at = n * RECORD;
-    buf.write(key, at, KEY, 'hex');
-    for (let k = 0; k < DIM; k++) buf.writeInt8(Math.max(-127, Math.min(127, Math.round(vector[k] * 127))), at + KEY + k);
-  });
-  // A worker killed mid-write leaves a partial record; cut it so later records stay aligned.
-  try { const size = fs.statSync(file).size; if (size % RECORD) fs.truncateSync(file, size - (size % RECORD)); } catch {}
-  fs.appendFileSync(file, buf, { mode: 0o600 });
+export function appendVectors(file, items, keep = () => true) {
+  const release = takeVectorLock(path.dirname(file));
+  if (!release) return 0;
+  try {
+    const selected = items.filter(keep);
+    if (!selected.length) return 0;
+    const buf = Buffer.alloc(selected.length * RECORD);
+    selected.forEach(({ key, vector }, n) => {
+      const at = n * RECORD;
+      buf.write(key, at, KEY, 'hex');
+      for (let k = 0; k < DIM; k++) buf.writeInt8(Math.max(-127, Math.min(127, Math.round(vector[k] * 127))), at + KEY + k);
+    });
+    // A worker killed mid-write leaves a partial record; cut it so later records stay aligned.
+    try { const size = fs.statSync(file).size; if (size % RECORD) fs.truncateSync(file, size - (size % RECORD)); } catch {}
+    fs.appendFileSync(file, buf, { mode: 0o600 });
+    return selected.length;
+  } finally { release(); }
+}
+
+/** Number of complete stored vector records whose text keys are in `keys`. */
+export function countVectors(file, keys) {
+  if (!keys.size) return 0;
+  let buf; try { buf = fs.readFileSync(file); } catch { return 0; }
+  let count = 0;
+  for (let at = 0; at + RECORD <= buf.length; at += RECORD) if (keys.has(buf.toString('hex', at, at + KEY))) count++;
+  return count;
+}
+
+/** Removes every matching append from a file. The caller holds that index's VECTOR_LOCK. */
+export function dropVectorsLocked(file, keys) {
+  if (!keys.size) return 0;
+  let buf; try { buf = fs.readFileSync(file); } catch { return 0; }
+  const kept = Buffer.alloc(buf.length), end = buf.length - (buf.length % RECORD);
+  let removed = 0, offset = 0;
+  for (let at = 0; at < end; at += RECORD) {
+    if (keys.has(buf.toString('hex', at, at + KEY))) { removed++; continue; }
+    buf.copy(kept, offset, at, at + RECORD); offset += RECORD;
+  }
+  if (!removed) return 0;
+  buf.copy(kept, offset, end);
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, kept.subarray(0, offset + (buf.length - end)), { mode: 0o600 });
+  fs.renameSync(temp, file);
+  cache.delete(file);
+  return removed;
 }
 
 const cache = new Map();

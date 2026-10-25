@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { cpuGrowth, fastestCpuMs } from './fixtures/helpers.js';
 import { denseCandidateKey, denseCandidates, denseJevCandidates, renderDense, selectDense, specificTokens } from '../core/dense.js';
 import { sha256 } from '../core/sha256.js';
 import { reconcile } from '../core/extractor.js';
@@ -57,17 +58,40 @@ describe('S4o dense notes', () => {
     expect(denseJevCandidates(choices, 'src/covered.ts --keep').map(({ text }) => text)).toEqual(['Need src/unique.ts --run', 'Also src/other.ts --check']);
   });
 
-  it('is deterministic and caps a 4000-line pool under 150ms', () => {
+  it('is deterministic, CPU-linear, and keeps a 4000-line pool responsive', () => {
     const candidates = Array.from({ length: 4000 }, (_, i) => ({
       text: `src/module-${i}.ts --mode-${i} commit ${String(i).padStart(8, '0')}`,
       source: 't' as const, recency: i / 4000, order: i,
     }));
+    const basePool = candidates.slice(0, 1000);
     const start = performance.now();
     const first = selectDense(candidates, '', 500, countTokens);
-    const elapsed = performance.now() - start;
+    let elapsed = performance.now() - start;
+    let wallAttempt = 1;
+    let wallAttempts = 1;
     expect(selectDense(candidates, '', 500, countTokens)).toEqual(first);
     expect(first.length).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(150);
+    // The absolute CPU ceiling catches expensive work at 4,000 lines; growth checks superlinear work across the 4x input
+    // increase.
+    // 4.9.1: Retry only the wall sample when the scheduler delays this process; CPU checks stay single-shot.
+    while (elapsed >= 1000 && wallAttempts < 3) {
+      const retryStart = performance.now();
+      selectDense(candidates, '', 500, countTokens);
+      const retryElapsed = performance.now() - retryStart;
+      wallAttempts += 1;
+      if (retryElapsed < elapsed) {
+        elapsed = retryElapsed;
+        wallAttempt = wallAttempts;
+      }
+      if (retryElapsed < 1000) {
+        elapsed = retryElapsed;
+        wallAttempt = wallAttempts;
+        break;
+      }
+    }
+    expect(fastestCpuMs(() => selectDense(candidates, '', 500, countTokens))).toBeLessThan(150);
+    expect(cpuGrowth((scale) => selectDense(scale === 1 ? basePool : candidates, '', 500, countTokens), undefined, 1)).toBeLessThan(8);
+    expect(elapsed, `selectDense took ${elapsed.toFixed(1)}ms for 4,000 lines on wall attempt ${wallAttempt}/${wallAttempts}; the generous wait ceiling is 1,000ms`).toBeLessThan(1000);
   });
 
   it('skips chat labels, the S4 sentinel, and native-summary boilerplate', () => {

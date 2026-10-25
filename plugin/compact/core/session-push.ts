@@ -14,6 +14,8 @@ export const SESSION_PUSH_TIMEOUT_MS = 3000;
  */
 export const SESSION_PUSH_POINTER = 'push-server.json';
 export const SESSION_PUSH_SERVER_TIMEOUT_MS = 1500;
+/** 4.9.1: the server stops before the hook's session-push timer expires. */
+export const SESSION_PUSH_SERVER_DEADLINE_MARGIN_MS = 200;
 
 export type PushPointer = { socket: string; token: string };
 
@@ -30,7 +32,7 @@ export function parsePushPointer(text: string): PushPointer | undefined {
 
 export type SessionPushFound = {
   cuts: number;
-  lines: readonly { segment: number; text: string }[];
+  lines: readonly { segment: number; text: string; key?: string }[];
   text: string;
 };
 
@@ -40,7 +42,7 @@ export function parseSessionPush(stdout: string): SessionPushFound | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const found = value as Partial<SessionPushFound>;
   if (typeof found.text !== 'string' || !found.text || !Array.isArray(found.lines) || !found.lines.length) return undefined;
-  if (!found.lines.every((line) => line !== null && typeof line === 'object' && typeof line.text === 'string' && Number.isFinite(line.segment))) return undefined;
+  if (!found.lines.every((line) => line !== null && typeof line === 'object' && typeof line.text === 'string' && Number.isFinite(line.segment) && (line.key === undefined || typeof line.key === 'string'))) return undefined;
   return { cuts: Number(found.cuts) || 0, lines: found.lines, text: found.text };
 }
 

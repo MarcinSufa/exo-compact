@@ -82,14 +82,31 @@ export function makeFsCaptureStore(fs: FsLike, baseDir: string): CaptureStore {
       };
       checkAbort();
       if (!records.length) {
+        checkAbort();
         await fs.write(watermarkPath, JSON.stringify({ watermark }));
         return;
       }
-      const entries = await listIfPresent(fs, baseDir);
-      const segments = entries.filter((entry) => entry.kind === 'file' && entry.name.startsWith(segmentPrefix)).sort((a, b) => a.name.localeCompare(b.name));
+      let segments: { name: string; kind: string; size: number }[] = [];
+      let contents = new Map<string, string>();
+      // 4.9.1: retention can rename a listed segment before read; restart the read pass once from the canonical listing.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        checkAbort();
+        const entries = await listIfPresent(fs, baseDir);
+        segments = entries.filter((entry) => entry.kind === 'file' && entry.name.startsWith(segmentPrefix)).sort((a, b) => a.name.localeCompare(b.name));
+        contents = new Map<string, string>();
+        try {
+          for (const entry of segments) {
+            checkAbort();
+            contents.set(entry.name, await fs.read(`${baseDir}/${entry.name}`));
+          }
+          break;
+        } catch (error) {
+          checkAbort();
+          if (attempt === 0 && error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') continue;
+          throw error;
+        }
+      }
       let name = segments.at(-1)?.name ?? `${segmentPrefix}000001.json`;
-      const contents = new Map<string, string>();
-      for (const entry of segments) contents.set(entry.name, await fs.read(`${baseDir}/${entry.name}`));
       const known = new Set<string>();
       /**
        * Round 9 finding 1: `sourceHash` is `identity#occurrence`, and `occurrence` is only

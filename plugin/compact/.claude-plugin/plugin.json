@@ -1,6 +1,6 @@
 {
   "name": "exo-compact",
-  "version": "4.9.0",
+  "version": "4.9.1",
   "description": "Fast, deterministic context compaction for Claude Code: a seed built from captured state instead of a model summary, plus local search over the compacted history.",
   "author": {
     "name": "Marcin Sufa"

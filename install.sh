@@ -22,7 +22,7 @@ die() { printf 'exo-compact: %s\n' "$*" >&2; exit 1; }
 # /dev/null: with curl | bash, stdin is this script.
 main() {
   local repo="${EXO_COMPACT_REPO:-https://github.com/MarcinSufa/exo-compact.git}"
-  local ref="${EXO_COMPACT_REF:-v4.9.0}"
+  local ref="${EXO_COMPACT_REF:-v4.9.1}"
   local dir="${EXO_COMPACT_HOME:-$HOME/.exo-compact}"
   local enable_dir="${EXO_COMPACT_ENABLE_DIR:-}"
   local plugin="$dir/plugin/compact"

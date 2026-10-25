@@ -1,7 +1,7 @@
 import { LEGACY_OPTIONS } from './fixtures/helpers.js';
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -149,12 +149,82 @@ describe('3.42.0 (S4zn) note and hook', () => {
   const POINTER = JSON.stringify({ socket: '/tmp/exo-recall-1/abc-1.sock', token: 't0k', pid: 1 });
   const answer = (text: string, status = 200) => async () => ({ status, ok: status === 200, headers: {}, text });
 
+  async function realServerFixture() {
+    const home = mkdtempSync(path.join(os.tmpdir(), 'session-push-home-'));
+    const project = mkdtempSync(path.join(os.tmpdir(), 'session-push-project-'));
+    const recallRoot = path.join(home, '.claude', 'exovault', 'recall');
+    mkdirSync(path.dirname(recallRoot), { recursive: true });
+    renameSync(indexed(TURNS, [4]), recallRoot);
+    mkdirSync(path.join(project, '.exovault'), { recursive: true });
+    writeFileSync(path.join(project, '.exovault', 's4-compact-active'), '');
+    const statePath = path.join(project, '.exovault', 's4-capture', SID, SESSION_PUSH_FILE);
+    mkdirSync(path.dirname(statePath), { recursive: true });
+    const server = (await startPushServer({ recallRoot, sessionId: SID, socketDir: socketDir() }))!;
+    return { home, project, recallRoot, statePath, server };
+  }
+
+  async function realPromptHook(home: string, project: string, runtime: { now?: () => Promise<number>; after?: (ms: number, fn: () => void) => { cancel: () => void } } = {}) {
+    const { register } = await import('../compact.js');
+    const on: Record<string, Handler> = {};
+    register(((name: string, fn: Handler) => { on[name] = fn; return { catch: (caught: unknown) => { (on as Record<string, unknown>)[name + '.catch'] = caught; } }; }) as never, { ...LEGACY_OPTIONS, recallPluginRoot: '/plugin', recallEnabled: true } as never);
+    const logs: string[] = [], fetches: Promise<{ status: number; ok: boolean; headers: Record<string, string>; text: string }>[] = [];
+    const h = {
+      session: { cwd: async () => project, root: async () => project, id: async () => SID, surfaces: async () => [] },
+      fs: {
+        exists: async (file: string) => existsSync(file),
+        read: async (file: string) => readFileSync(file, 'utf8'),
+        write: async (file: string, text: string) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, text); },
+        list: async () => [],
+      },
+      env: { get: async (name: string) => name === 'HOME' ? home : undefined },
+      clock: {
+        now: runtime.now ?? (async () => Date.now()),
+        after: runtime.after ?? ((ms: number, fn: () => void) => { const timer = setTimeout(fn, ms); return { cancel: () => clearTimeout(timer) }; }),
+      },
+      http: { fetch: async (url: string, init: Parameters<Fetch>[1]) => {
+        const request = post(init.socketPath!, JSON.parse(init.body!), init.headers ?? {}).then(({ status, text }) => ({ status, ok: status >= 200 && status < 300, headers: {}, text }));
+        fetches.push(request);
+        return request;
+      } },
+      process: { run: async () => { throw new Error('unexpected CLI fallback'); } },
+      ui: { log: (line: string) => { logs.push(line); } },
+    };
+    let passed: { context?: string[] } = {};
+    await on['prompt.submit']!(h, { text: 'Is pg-745a still the staging database?', origin: { kind: 'sdk' } }, async (event) => { passed = event as never; return event; });
+    return { logs, context: passed.context, fetches };
+  }
+
+  it('4.9.1: a slow clock read cannot make the server deadline outlast the hook timer', async () => {
+    const fixture = await realServerFixture();
+    try {
+      const result = await realPromptHook(fixture.home, fixture.project, {
+        now: async () => { await new Promise((resolve) => setTimeout(resolve, 1550)); return Date.now(); },
+      });
+      expect(result.context?.some((context) => context.includes('pg-745a'))).toBe(true);
+      expect(result.logs[0]).toMatch(/session_push\.fired=1 lines=1 chars=\d+ cuts=1 via=server/);
+      expect(JSON.parse(readFileSync(fixture.statePath, 'utf8'))).toEqual({ cuts: 1, shown: [expect.any(String)] });
+    } finally { await fixture.server.close(); }
+  });
+
+  it('4.9.1: a timed-out server answer leaves the state file untouched', async () => {
+    const fixture = await realServerFixture();
+    try {
+      const result = await realPromptHook(fixture.home, fixture.project, {
+        after: (_ms, fn) => { queueMicrotask(fn); return { cancel: () => {} }; },
+      });
+      expect(result.context ?? []).toEqual([]);
+      expect(result.logs).toContain('session_push.fired=0 via=server reason=timeout');
+      await Promise.all(result.fetches);
+      expect(existsSync(fixture.statePath)).toBe(false);
+    } finally { await fixture.server.close(); }
+  });
+
   it('4.8.2 (S5s): with a recall server for the session, the prompt goes to it over its socket and nothing is spawned', async () => {
     const r = await promptHook({ recallEnabled: true }, 'what was the auth ticket?', FOUND, { pointer: POINTER, fetch: answer(FOUND) });
     expect(r.runs).toHaveLength(0);
     expect(r.fetches).toHaveLength(1);
     expect(r.fetches[0]!.init).toMatchObject({ method: 'POST', socketPath: '/tmp/exo-recall-1/abc-1.sock', headers: { 'x-exo-token': 't0k' } });
-    expect(JSON.parse(r.fetches[0]!.init.body!)).toEqual({ session: 's1', prompt: 'what was the auth ticket?', stateFile: expect.stringMatching(new RegExp(`/${SESSION_PUSH_FILE}$`)), deadline: 1500 });
+    expect(JSON.parse(r.fetches[0]!.init.body!)).toEqual({ session: 's1', prompt: 'what was the auth ticket?', stateFile: expect.stringMatching(new RegExp(`/${SESSION_PUSH_FILE}$`)), deadline: 1300 });
     expect(r.context?.some((c) => c.includes('[segment 0] Note: OPS-5744'))).toBe(true);
     expect(r.logs).toContain('session_push.fired=1 lines=1 chars=26 cuts=1 via=server');
   });
@@ -224,7 +294,7 @@ function post(socketPath: string, body: unknown, headers: Record<string, string>
 const socketDir = () => { const dir = mkdtempSync(path.join(os.tmpdir(), 'sp-')); chmodSync(dir, 0o700); return dir; };
 
 describe.skipIf(process.platform === 'win32')('4.8.2 (S5s) the recall server answers session push', () => {
-  it('answers like the CLI and keeps the shown lines; needs its token and its own session', async () => {
+  it('answers with keys but leaves shown state to the hook; needs its token and its own session', async () => {
     const root = indexed(TURNS, [4]);
     const state = path.join(mkdtempSync(path.join(os.tmpdir(), 'session-push-state-')), SESSION_PUSH_FILE);
     const server = (await startPushServer({ recallRoot: root, sessionId: SID, socketDir: socketDir() }))!;
@@ -237,7 +307,9 @@ describe.skipIf(process.platform === 'win32')('4.8.2 (S5s) the recall server ans
     const first = await ask();
     expect(first.status).toBe(200);
     expect(JSON.parse(first.text).lines).toHaveLength(1);
-    expect(JSON.parse((await ask()).text)).toBeNull();
+    expect(JSON.parse(first.text).lines[0].key).toEqual(expect.any(String));
+    expect(existsSync(state)).toBe(false);
+    expect(JSON.parse((await ask()).text).lines).toHaveLength(1);
     expect((await ask({}, 'wrong')).status).toBe(403);
     expect((await ask({ session: 'someone-else' })).status).toBe(409);
     await server.close();

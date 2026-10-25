@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from '../compact.js';
 import { reconcile } from '../core/extractor.js';
-import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS } from './fixtures/helpers.js';
+import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS, cpuMsAsync } from './fixtures/helpers.js';
 import type { CompactEvent, SessionMessage } from '../core/types.js';
 import type { FakeHost } from './fixtures/helpers.js';
 import { makeFsCaptureStore } from '../host/fs-adapter.js';
@@ -13,6 +13,19 @@ import { countTokens as gateCountTokens } from './fixtures/helpers.js';
 import { capturedUserText, labelKey } from '../core/labels.js';
 
 type Handler = ($: FakeHost, event: unknown, next: (event: unknown) => Promise<unknown>) => Promise<unknown>;
+type CompactPerfAttempt = {
+  attempt: number;
+  result: { messages?: SessionMessage[]; fellBack?: boolean };
+  cpuMs: number;
+  totalMs: number;
+  maxBlockMs: number;
+};
+type CompactPerfRetryResult = {
+  attempts: CompactPerfAttempt[];
+  diagnosticAttempt: CompactPerfAttempt;
+  contentAttempt: CompactPerfAttempt;
+  passed: boolean;
+};
 
 /** Mirrors the relative path `compact.ts` reads and `setup.cjs` writes (CONTRACT.md's S3/S4
  * mutual exclusion section). */
@@ -1470,8 +1483,64 @@ describe('compact.ts: mutation survivor M6 (reasoning budget must subtract const
 describe('compact.ts: round 15 perf gate, real handler wiring against a real-size capture store (brief-s4a-fix15.md item 4)', () => {
   const FIXTURE_URL = new URL('./fixtures/round15-large-capture.ndjson', import.meta.url);
   const PROBE_INTERVAL_MS = 15;
-  const TOTAL_BUDGET_MS = 1500;
+  const CPU_BUDGET_MS = 1000;
+  const TOTAL_WALL_BUDGET_MS = 10_000;
   const MAX_BLOCK_BUDGET_MS = 1000;
+  const MAX_ATTEMPTS = 3;
+
+  // 4.9.1: Issue #68: interval lag is wall time and can spike under load even when the handler did not block.
+  // A real handler slowdown repeats; a scheduling spike may not, so retry with fresh state up to three times.
+  async function runCompactAttempts(runAttempt: (attempt: number) => Promise<CompactPerfAttempt>): Promise<CompactPerfRetryResult> {
+    const attempts: CompactPerfAttempt[] = [];
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      const measured = await runAttempt(attempt);
+      attempts.push(measured);
+      if (measured.cpuMs < CPU_BUDGET_MS && measured.totalMs < TOTAL_WALL_BUDGET_MS && measured.maxBlockMs < MAX_BLOCK_BUDGET_MS) {
+        return { attempts, diagnosticAttempt: measured, contentAttempt: measured, passed: true };
+      }
+    }
+    const diagnosticAttempt = attempts.reduce((best, measured) => measured.maxBlockMs < best.maxBlockMs ? measured : best);
+    return { attempts, diagnosticAttempt, contentAttempt: attempts[attempts.length - 1]!, passed: false };
+  }
+
+  it('retries a load-related lag spike and uses the first attempt within all three budgets', async () => {
+    const calls: number[] = [];
+    const samples = [
+      { cpuMs: 80, totalMs: 1700, maxBlockMs: 1637.8 },
+      { cpuMs: 85, totalMs: 220, maxBlockMs: 17.2 },
+      { cpuMs: 90, totalMs: 200, maxBlockMs: 15.1 },
+    ];
+    const measured = await runCompactAttempts(async (attempt) => {
+      calls.push(attempt);
+      return { attempt, result: { fellBack: true }, ...samples[attempt - 1]! };
+    });
+
+    expect(calls).toEqual([1, 2]);
+    expect(measured.passed).toBe(true);
+    expect(measured.diagnosticAttempt.attempt).toBe(2);
+    expect(measured.contentAttempt.attempt).toBe(2);
+  });
+
+  it('uses the smallest-lag attempt for failure diagnostics and the last attempt for content checks', async () => {
+    const calls: number[] = [];
+    const samples = [
+      { cpuMs: 1200, totalMs: 1500, maxBlockMs: 1800 },
+      { cpuMs: 1100, totalMs: 12_000, maxBlockMs: 1250 },
+      { cpuMs: 1300, totalMs: 1300, maxBlockMs: 1400 },
+    ];
+    const measured = await runCompactAttempts(async (attempt) => {
+      calls.push(attempt);
+      return { attempt, result: { fellBack: true }, ...samples[attempt - 1]! };
+    });
+
+    expect(calls).toEqual([1, 2, 3]);
+    expect(measured.passed).toBe(false);
+    expect(measured.diagnosticAttempt.attempt).toBe(2);
+    expect(measured.contentAttempt.attempt).toBe(3);
+  });
+
+  // The old 1.5 s wall budget failed when a loaded server delayed this process (PR #64, issue #49). CPU time tracks the
+  // handler's own work; retain a generous wall ceiling and the interval-lag ceiling to catch waits and synchronous blocks.
 
   /** Real `setInterval` lag probe (not a vitest fake timer): the gap between an interval firing
    * and when it was scheduled to fire is exactly how long something else held the event loop. */
@@ -1486,69 +1555,91 @@ describe('compact.ts: round 15 perf gate, real handler wiring against a real-siz
     }, PROBE_INTERVAL_MS);
     return {
       stop: () => {
+        const lag = performance.now() - last - PROBE_INTERVAL_MS;
+        if (lag > maxLag) maxLag = lag;
         clearInterval(timer);
         return maxLag;
       },
     };
   }
 
-  it('a session.compact through the real handler, over the ~950KB evidence-derived capture store, stays under the time and event-loop-block budgets', async () => {
+  it('a session.compact through the real handler, over the ~950KB evidence-derived capture store, stays within CPU and blocking budgets', async () => {
     const fixtureSegment = readFileSync(FIXTURE_URL, 'utf8');
     const baseDir = '/project/.exovault/s4-capture/session-default'; // captures anchor at the flag directory (fakeHost cwd /project); fakeHost()'s default session id is 'session-default'
-    const files = new Map<string, string>([[`${baseDir}/segment-000001.json`, fixtureSegment]]);
-    const fsList = async (path = ''): Promise<{ name: string; kind: string; size: number }[]> =>
-      [...files.keys()].filter((key) => key.startsWith(`${path}/`)).map((key) => ({ name: key.slice(path.length + 1), kind: 'file', size: files.get(key)!.length }));
-    const fsRead = async (path: string): Promise<string> => (path === FLAG_PATH ? '1' : files.get(path) ?? Promise.reject(new Error(`ENOENT: ${path}`)));
-    const fsWrite = async (path: string, text: string): Promise<void> => {
-      files.set(path, text);
-    };
-    const clockSleep = (ms: number, { signal }: { signal: AbortSignal }): Promise<void> =>
-      new Promise((resolve, reject) => {
-        if (signal.aborted) {
-          reject(new Error('aborted'));
-          return;
-        }
-        const timer = setTimeout(resolve, ms);
-        signal.addEventListener('abort', () => {
-          clearTimeout(timer);
-          reject(new Error('aborted'));
-        }, { once: true });
-      });
-    const $ = fakeHost({ fsList, fsRead, fsWrite, clockSleep });
-    const handlers = harness({ contract: 'the contract' });
-    const next = async () => ({ fellBack: true }) as unknown;
-    const event: CompactEvent = { trigger: 'auto', messages: bulkyToolConversation() };
+    const measured = await runCompactAttempts(async (attempt) => {
+      const files = new Map<string, string>([[`${baseDir}/segment-000001.json`, fixtureSegment]]);
+      const fsList = async (path = ''): Promise<{ name: string; kind: string; size: number }[]> =>
+        [...files.keys()].filter((key) => key.startsWith(`${path}/`)).map((key) => ({ name: key.slice(path.length + 1), kind: 'file', size: files.get(key)!.length }));
+      const fsRead = async (path: string): Promise<string> => (path === FLAG_PATH ? '1' : files.get(path) ?? Promise.reject(new Error(`ENOENT: ${path}`)));
+      const fsWrite = async (path: string, text: string): Promise<void> => {
+        files.set(path, text);
+      };
+      const clockSleep = (ms: number, { signal }: { signal: AbortSignal }): Promise<void> =>
+        new Promise((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error('aborted'));
+            return;
+          }
+          const timer = setTimeout(resolve, ms);
+          signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(new Error('aborted'));
+          }, { once: true });
+        });
+      const $ = fakeHost({ fsList, fsRead, fsWrite, clockSleep });
+      const handlers = harness({ contract: 'the contract' });
+      const next = async () => ({ fellBack: true }) as unknown;
+      const event: CompactEvent = { trigger: 'auto', messages: bulkyToolConversation() };
+      const probe = startLagProbe();
+      const start = performance.now();
+      let probeStopped = false;
+      try {
+        const result = await cpuMsAsync(() => handlers['session.compact']($, event, next));
+        const totalMs = performance.now() - start;
+        const maxBlockMs = probe.stop();
+        probeStopped = true;
+        return { attempt, result: result.result as CompactPerfAttempt['result'], cpuMs: result.cpuMs, totalMs, maxBlockMs };
+      } finally {
+        if (!probeStopped) probe.stop();
+      }
+    });
+    const { diagnosticAttempt, contentAttempt, attempts, passed } = measured;
+    const attemptDetail = (sample: CompactPerfAttempt) =>
+      `attempt ${sample.attempt}: CPU=${sample.cpuMs.toFixed(1)}ms, wall=${sample.totalMs.toFixed(1)}ms, lag=${sample.maxBlockMs.toFixed(1)}ms`;
+    const attemptSummary = passed
+      ? `first attempt meeting all budgets: ${attemptDetail(diagnosticAttempt)} (${attempts.length} attempt${attempts.length === 1 ? '' : 's'} measured)`
+      : `all ${MAX_ATTEMPTS} attempts failed; smallest-lag attempt: ${attemptDetail(diagnosticAttempt)}; measurements: ${attempts.map(attemptDetail).join('; ')}`;
+    const result = contentAttempt.result;
 
-    const probe = startLagProbe();
-    const start = performance.now();
-    const result = (await handlers['session.compact']($, event, next)) as { messages?: SessionMessage[]; fellBack?: boolean };
-    const totalMs = performance.now() - start;
-    const maxBlockMs = probe.stop();
-
-    expect(result.messages ?? result.fellBack, 'sanity: the handler must actually return something (a compaction or an explicit fallback), not throw').toBeDefined();
-    expect(
-      totalMs,
-      `compact.ts session.compact took ${totalMs.toFixed(1)}ms end to end against the ~950KB evidence-derived capture store fixture; budget is ${TOTAL_BUDGET_MS}ms (brief-s4a-fix15.md item 2's 500ms target plus generous CI headroom)`,
-    ).toBeLessThan(TOTAL_BUDGET_MS);
-    expect(
-      maxBlockMs,
-      `the longest single stretch this handler blocked the event loop (measured by a real ${PROBE_INTERVAL_MS}ms setInterval lag probe running alongside, not a vitest fake timer) was ${maxBlockMs.toFixed(1)}ms; budget is ${MAX_BLOCK_BUDGET_MS}ms (brief-s4a-fix15.md item 4)`,
-    ).toBeLessThan(MAX_BLOCK_BUDGET_MS);
+    expect(result.messages ?? result.fellBack, `sanity: attempt ${contentAttempt.attempt} must return something (a compaction or an explicit fallback), not throw`).toBeDefined();
 
     // Round 17 (brief-s4a-fix17.md item 3, "seed stays within 6k tokens on evidence input"): the
-    // same real handler run, over the same real evidence-derived fixture, must produce a seed
+    // passing run, or the final run when all attempts miss a timing budget, must produce a seed
     // whose Key facts section is populated AND whose total size still fits SEED_BUDGET_TOKENS.
     const seed = result.messages?.[0];
-    expect(seed?.text, 'the perf-gate run must produce an actual seed, not a fallback').toBeDefined();
+    expect(seed?.text, `attempt ${contentAttempt.attempt} must produce an actual seed, not a fallback`).toBeDefined();
     expect(seed!.text).toContain('## Key facts');
     expect(seed!.text).not.toMatch(/## Key facts\n\(none\)/);
     expect(seed!.text).toContain('KESTREL-9');
     const seedTokens = gateCountTokens(seed!.text);
     expect(
       seedTokens,
-      `the rendered seed was ${seedTokens} tokens against the real evidence-derived fixture; budget is ${SEED_BUDGET_TOKENS}`,
+      `attempt ${contentAttempt.attempt} rendered ${seedTokens} tokens against the real evidence-derived fixture; budget is ${SEED_BUDGET_TOKENS}`,
     ).toBeLessThanOrEqual(SEED_BUDGET_TOKENS);
-  });
+
+    expect.soft(
+      diagnosticAttempt.cpuMs,
+      `compact.ts session.compact process CPU budget is ${CPU_BUDGET_MS}ms; ${attemptSummary}`,
+    ).toBeLessThan(CPU_BUDGET_MS);
+    expect.soft(
+      diagnosticAttempt.totalMs,
+      `compact.ts session.compact generous wall budget is ${TOTAL_WALL_BUDGET_MS}ms; ${attemptSummary}`,
+    ).toBeLessThan(TOTAL_WALL_BUDGET_MS);
+    expect.soft(
+      diagnosticAttempt.maxBlockMs,
+      `the real ${PROBE_INTERVAL_MS}ms setInterval lag ceiling is ${MAX_BLOCK_BUDGET_MS}ms; ${attemptSummary}`,
+    ).toBeLessThan(MAX_BLOCK_BUDGET_MS);
+  }, 60_000);
 });
 
 /**

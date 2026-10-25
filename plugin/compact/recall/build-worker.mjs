@@ -6,6 +6,7 @@ import { blocks, chunk, clean, hash, redact, redactAll } from './shared.mjs';
 import { timelineBuilder } from './timeline.mjs';
 import { DEFAULT_RETENTION_DAYS, pruneOld } from './cleanup.mjs';
 import { homeDir } from './paths.mjs';
+import { dropVectorsLocked, takeVectorLock, textKey, vectorFile } from './vectors.mjs';
 
 const [transcript, root, sessionId, cutoffRaw, projectDir = path.dirname(transcript), mode = 'lexical', trigger = 'cut', retentionRaw = String(DEFAULT_RETENTION_DAYS)] = process.argv.slice(2);
 // After an answer the index is refreshed only once the transcript grew by this much, so short turns cost nothing.
@@ -32,7 +33,13 @@ if (!locked) {
   process.exit(0);
 }
 const redactPath = (value) => (typeof value === 'string' ? redactAll(value) : value);
-const redactRow = (row) => ({ ...row, text: redact(row.text), ...(row.filePath === undefined ? {} : { filePath: redactPath(row.filePath) }) });
+const redactedKeys = new Set();
+const redactRow = (row) => {
+  const text = redact(row.text);
+  if (text !== row.text && typeof row.text === 'string') redactedKeys.add(textKey(row.text));
+  return { ...row, text, ...(row.filePath === undefined ? {} : { filePath: redactPath(row.filePath) }) };
+};
+let releaseVectors;
 try {
   const own = parseTranscript(transcript, cutoffByte, sessionId);
   const parent = findParentPrefix(transcript, projectDir, own.parentUuid);
@@ -67,8 +74,15 @@ try {
   fs.writeFileSync(path.join(staging, 'records.json'), JSON.stringify(all), { mode: 0o600 });
   fs.writeFileSync(path.join(staging, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
   fs.renameSync(staging, path.join(dir, `generation-${String(generation).padStart(8, '0')}`));
+  // 4.9.1: remove vectors for changed carried rows before publishing their redacted text.
+  if (redactedKeys.size) {
+    releaseVectors = takeVectorLock(dir);
+    if (!releaseVectors) throw new Error('index disappeared before its vectors could be redacted');
+    dropVectorsLocked(vectorFile(dir), redactedKeys);
+  }
   const currentTmp = path.join(dir, `.CURRENT-${process.pid}.tmp`);
   fs.writeFileSync(currentTmp, `${generation}\n`, { mode: 0o600 }); fs.renameSync(currentTmp, path.join(dir, 'CURRENT'));
+  releaseVectors?.(); releaseVectors = undefined;
   // The session map the next compaction puts in the seed (one entry per segment); small, read whole by the hook.
   const timelineTmp = path.join(dir, `.timeline-${process.pid}.tmp`);
   fs.writeFileSync(timelineTmp, JSON.stringify({ cutoffPosition: cutoffByte, segments: own.timeline }), { mode: 0o600 }); fs.renameSync(timelineTmp, path.join(dir, 'timeline.json'));
@@ -77,6 +91,7 @@ try {
 } catch (error) {
   fs.writeFileSync(path.join(dir, 'last-build-error'), `${error?.name ?? 'Error'}\n`, { mode: 0o600 });
 } finally {
+  releaseVectors?.();
   try { fs.unlinkSync(lock); } catch {}
   try {
     const queuedCutoff = Number(fs.readFileSync(pending, 'utf8').trim());

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -11,6 +11,7 @@ import { DIM, EMBED_SLOTS, appendVectors, nearest, readVectors, storedKeys, take
 
 /** A unit vector along one axis, so cosines are 1 for the same axis and 0 otherwise. */
 const axis = (k: number) => { const v = new Float32Array(DIM); v[k] = 1; return v; };
+const vectorsModule = new URL('../recall/vectors.mjs', import.meta.url).href;
 
 function makeIndex(root: string, session: string, texts: string[]) {
   const dir = path.join(root, hash(session));
@@ -60,6 +61,37 @@ describe('recall vectors', () => {
       expect(covered).toBe(3);
       expect(list[0][0]).toBe(1);
       expect(list[0][1]).toBeCloseTo(1, 5);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('returns 0 from appendVectors within its bound when a live lock holder never releases', () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 's4-vector-lock-'));
+    try {
+      const file = path.join(tmp, 'vectors.bin'), lock = path.join(tmp, 'VECTOR_LOCK');
+      writeFileSync(file, '');
+      writeFileSync(lock, String(process.pid));
+      const source = `import { appendVectors, DIM } from ${JSON.stringify(vectorsModule)}; const vector = new Float32Array(DIM); vector[0] = 1; console.log(appendVectors(${JSON.stringify(file)}, [{ key: '0123456789abcdef', vector }]));`;
+      const started = Date.now();
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', timeout: 3500 });
+      expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe('0');
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(statSync(file).size).toBe(0);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('takes over an old vector lock even when its pid is alive', () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 's4-vector-lock-'));
+    try {
+      const lock = path.join(tmp, 'VECTOR_LOCK'), old = Date.now() - 60_000;
+      writeFileSync(lock, String(process.pid));
+      utimesSync(lock, old / 1000, old / 1000);
+      expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThan(30_000);
+      const source = `import fs from 'node:fs'; import { takeVectorLock } from ${JSON.stringify(vectorsModule)}; const dir = ${JSON.stringify(tmp)}; const release = takeVectorLock(dir); console.log(release && fs.readFileSync(${JSON.stringify(lock)}, 'utf8').trim() === String(process.pid) ? 'owned' : 'busy'); release?.();`;
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', timeout: 3500 });
+      expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe('owned');
+      expect(existsSync(lock)).toBe(false);
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 

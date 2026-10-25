@@ -329,6 +329,7 @@ anything built from parsed data) can carry an arbitrary `constructor.name` strin
 - `listIfPresent(fs: FsLike, dir: string): Promise<{name,kind,size}[]>` (round 7 D2): `fs.list` on a directory that has never been written to rejects on a real host (Node `readdir` behavior; cc.d.ts makes no promise of an empty result for a missing path). Every session's first `appendRecords` lists a capture directory that does not exist yet, so a bare `fs.list(dir)` there throws; a fake `list` that defaults to `[]` for a missing path hides this. `listIfPresent` only swallows a `list` rejection when `fs.exists` separately confirms the directory is absent; any other rejection (a real read failure) still propagates. Used by both `fs-adapter.ts`'s own `appendRecords` and `compact.ts`'s render-time segment read.
 - `makeFsCaptureStore(fs: FsLike, baseDir: string): CaptureStore` with `CaptureStore { loadWatermark(): Promise<ContentWatermark|null>, appendRecords(records, watermark, signal?: AbortSignal): Promise<void> }`.
   - No shared append (`$.fs` is whole-file write only); each write replaces one per-segment file kept under the 4 MiB cap. A missing path may return `null`; a failed read of a listed or existing segment rejects. Read every existing segment before writing any changed segment, so a failed read cannot replace data with an empty value. Capture storage lives at `.exovault/s4-capture/<safe session id>/`, where the id is sanitized to `[A-Za-z0-9._-]`.
+  - **A segment that disappears during a retention rename is retried once (4.9.1):** if a listed segment read fails with `ENOENT`, `appendRecords` discards that read pass, lists the canonical directory again, and rereads its segments before writing. A second `ENOENT` or any other error still rejects without writing the watermark; the supplied `signal` is checked before retrying.
   - **Write amplification (round 7 D4):** `appendRecords` builds every touched segment's lines in memory first (one in-memory pass over all new records, appending to the correct segment and rolling over past the byte cap) and writes each changed segment to `fs.write` at most once at the end, instead of re-serializing and writing the whole segment after every single record. A turn producing many records used to cost one whole-file write per record; it now costs at most one write per segment actually touched.
   - **`value`/`todo` dedupe is content-keyed, not `sourceHash`-keyed (round 9 finding 1):** `sourceHash` is `identity#occurrence`, and `occurrence` only counts uniquely against the exact message list `reconcile` last saw it in; a compaction rewrites that list and restarts the count, so a `value`/`todo` re-asserted with content it held earlier (a value reset back to a prior state, a todo reopened with its old text) can land on the same `sourceHash` as that earlier record and get wrongly skipped by a plain `known.has(sourceHash)` check. `appendRecords` instead tracks the latest stored record per stable `value:<key>`/`todo:<id>` state key and only skips a new record for that key when its `body` is deep-equal to that latest one; any other kind still dedupes on `kind:sourceHash` as before. This mirrors the `latest`-wins fold `compact.ts` already does at render time.
   - **Old-format watermark is treated as absent, not thrown on (round 9 finding 9 note):** `loadWatermark` returns `null` unless the stored `watermark` is an object with an `identities` array; an r7-shaped `{ sha256, occurrence }` watermark (or any other non-matching shape) is treated exactly like no watermark, so a store built by an older version re-derives capture from scratch on its next reconcile instead of throwing inside `findWatermarkIndex` on every compaction for the rest of that store's life.
@@ -3318,20 +3319,70 @@ probe, then the real one). A server removes the pointer on close only while it s
 when stdin ends, on exit and on SIGINT, SIGTERM and SIGHUP.
 
 **Request.** POST `/session-push`, header `x-exo-token` (compared in constant time; 403 otherwise), body
-`{ session, prompt, stateFile }` up to 1 MiB (413). A session other than the server's own gets 409 (after `/clear`
-the new session has no server and the hook spawns). The answer is what `session-push.mjs` prints: the found lines
-or `null`, from the same `pushForPrompt`, which keeps the shown lines in `stateFile` (absolute paths only).
+`{ session, prompt, stateFile, deadline }` up to 1 MiB (413). A session other than the server's own gets 409 (after
+`/clear` the new session has no server and the hook spawns). The answer is the found lines, including their state keys,
+or `null`, from the same `pushForPrompt`. The server reads but does not write `stateFile` (absolute paths only); the
+hook saves returned keys only after it accepts and uses the answer. The CLI fallback keeps writing the same
+`{ cuts, shown }` file itself.
 
 **Hook.** `runSessionPush` reads the pointer of `$.session.id()`. No pointer: it spawns `session-push.mjs` as before,
 and the log line is unchanged. A pointer that is not JSON with an absolute socket path or a named pipe and a token, a
 rejected fetch or a non-200 answer, or an answer that is neither `null` nor a valid push: it spawns, and the log line
 ends in ` via=spawn`. A server answer: the line ends in ` via=server`. No answer within
 `SESSION_PUSH_SERVER_TIMEOUT_MS` (1500): `session_push.fired=0 via=server reason=timeout`, and nothing is spawned for
-that prompt, since a second search would race the server for the state file.
+that prompt. One clock reading starts the timer and sets a server deadline 200 ms earlier; a late response is discarded
+without changing shown state.
 
 Gate tests: `session-push.gate.test.ts` (hook with a fake socket: server answer, `null`, gone, 403, broken pointer,
-timeout; real server: answers like the CLI, keeps the shown lines, token and session checks, pointer mode, a closing
+timeout; real server: returns keys without saving shown state, token and session checks, pointer mode, a closing
 older server leaves a newer pointer, refused socket directory and over-long path, `mcp-server.mjs` starts it from
 `CLAUDE_CODE_SESSION_ID` and removes socket and pointer when stdin closes). Live probe
 `__gate-s4__/live/g11-session-push-server.mjs`: one stream-json session with the recall server, a note with a rare id,
 `/compact`, a question about the id; the notice log has a `session_push.fired=1 ... via=server` line.
+
+### 4.9.1: cleanup races, vectors and queued cutoffs
+
+`cleanup.mjs --apply` backs up the per-session vector file before dropping every vector record keyed by a row text it
+re-redacts, across the append history; vectors for unchanged row text stay. The next `build-worker.mjs` drops those old
+keys before publishing its redacted generation. `embed-worker.mjs` checks each batch against the current rows under the
+same per-index vector lock, so an in-flight embedding cannot restore an old key. After cleanup releases its build locks,
+it starts queued cutoffs for surviving indexes in vectors mode when the index already has its vector file, and lexical
+mode otherwise; a queued cutoff in an index pruned by that run is dropped and counted. A vector lock wait is bounded to
+2 seconds, and a lock file older than 30 seconds is taken over even if its pid is alive. An append that cannot acquire
+the lock adds nothing and returns 0; a build drop that cannot acquire it fails without publishing its generation.
+
+Cleanup compares the current contents of each capture and brief file it is about to replace with the text it redacted,
+immediately before the rename. If a save changed the file in the meantime, cleanup leaves it for the next run. This
+protects both a saved brief and `briefs.json` without adding a lock or wait to the hook save path. Retention atomically
+renames an old capture directory to a hidden sibling beside `s4-capture`, checks freshness again in the moved tree and
+linked stores, then deletes only the moved tree. Capture writers keep using the canonical session path; a write after
+the rename creates a new directory there. If the rename fails, retention leaves the capture where it is. Gate:
+`cleanup.gate.test.ts`
+deterministically writes a brief and a capture in the final rewrite/delete windows for both retention paths.
+
+Recall redaction (`recall/shared.mjs`) runs the original key and named regex patterns after a bounded prescan. The prescan
+only examines lines longer than 64 KiB; text whose lines are all within the bound skips it, preserving the earlier
+exact regex output. Logical line endings are LF, CR, CRLF, U+2028 and U+2029. On long lines, provider-shaped keys,
+bearer values, URL credential passwords and oversized named values fail closed. The named value ends at the matched
+pattern's value class: `\S+` stops at whitespace, while `VALUE` stops at whitespace, `;`, `&` or `|`.
+
+For an oversized quoted value opened on a long line, a valid closing quote may occur after a line ending; the prescan
+checks through that close and removes the quoted value as a unit. If no valid close exists, it removes the value through
+the first line ending and keeps that ending. Values on lines at or below the bound are left to the original patterns,
+including their existing quoted-value (2,048 character) and URL-password (256 character) limits. `looksLikeKey` caps
+its value scan at 64 KiB. If a pattern's `replace` throws, the wrapper retries after replacing oversized lines with
+`[redacted]`; a second failure returns that fallback, or `[redacted]` if no oversized line could be removed.
+
+Retention plans also scan hidden siblings named `.<id>.retention-<pid>-<ms>-<n>` beside every capture root. A tombstone
+whose pid is alive and name time is less than 10 minutes old is skipped. A tombstone is restored only when its newest file
+is more than one hour old, its recorded pid is dead and its canonical path is free or planned for pruning in the same run;
+a tombstone newer than the retention cutoff that does not meet those conditions is left for a later run.
+When the canonical path exists, that tree is current state re-derived from the transcript, so mixing older files could let
+stale records win. A tombstone whose newest file is older than the retention window is deleted even when the canonical path
+exists. Dry-run reports and both retention summaries count restored, deleted, left and skipped tombstones; `cleanup --apply`
+backs up tombstones it will delete. Scanning does not follow symlinks, and a tombstone for the running `sessionId` is never
+touched.
+Recovery rechecks the canonical path immediately before rename and verifies the restored tree's newest-file mtime afterward.
+Node's rename may replace an empty target directory, so a writer's first write after an hour of silence can still race if it
+starts within the same milliseconds.
+The worker checks tombstones on every invocation, even when its daily stamp defers ordinary index and capture pruning.

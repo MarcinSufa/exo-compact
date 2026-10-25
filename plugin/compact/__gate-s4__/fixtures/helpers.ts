@@ -28,18 +28,40 @@ export function fastestCpuMs(work: () => unknown, runs = 3): number {
   return best;
 }
 
+/** Result and CPU milliseconds (user + system) from an awaited run of `work`. */
+export async function cpuMsAsync<T>(work: () => Promise<T>): Promise<{ result: T; cpuMs: number }> {
+  const start = process.cpuUsage();
+  const result = await work();
+  const used = process.cpuUsage(start);
+  return { result, cpuMs: (used.user + used.system) / 1000 };
+}
+
+/** Repetitions needed for the fastest of three base samples to use at least 20 ms of CPU. */
+export function cpuRepetitions(work: () => unknown): number {
+  let repetitions = 4;
+  while (fastestCpuMs(() => {
+    for (let run = 0; run < repetitions; run++) work();
+  }) < 20 && repetitions < 1024) repetitions = Math.min(repetitions * 2, 1024);
+  return repetitions;
+}
+
 /**
  * How much the CPU time of `work` grows when its input grows 4x: the median of five `work(4 * base)` / `work(base)`
  * pair ratios. Linear work grows about 4x and a backtracking regression 16x or more, whatever the machine's speed or
  * load, so timing guards assert growth instead of an absolute bound that a slow CI runner breaks.
  */
-export function cpuGrowth(work: (scale: number) => unknown, measure: (run: () => unknown) => number = cpuMs): number {
-  // The base input doubles until its run takes 20 ms (the fastest of three, so one outlier does not pick it), so timer
-  // noise on a short run neither reads as growth nor hides it on a fast machine. Each pair times both sizes back to
-  // back, so both see the same load, alternating which goes first; the median of five drops a pair a burst skewed.
+export function cpuGrowth(
+  work: (scale: number) => unknown,
+  measure: (run: () => unknown) => number = cpuMs,
+  maxBase = 1024,
+): number {
+  // The base input doubles until its run takes 20 ms (the fastest of three, so one outlier does not pick it) or reaches
+  // maxBase (1024 by default), so timer noise on a short run neither reads as growth nor hides it on a fast machine.
+  // Each pair times both sizes back to back, so both see the same load, alternating which goes first; the median of five
+  // drops a pair a burst skewed.
   const fastest = (scale: number) => Math.min(measure(() => work(scale)), measure(() => work(scale)), measure(() => work(scale)));
   let base = 1;
-  while (fastest(base) < 20 && base < 1024) base *= 2;
+  while (fastest(base) < 20 && base < maxBase) base = Math.min(base * 2, maxBase);
   const ratios: number[] = [];
   for (let pair = 0; pair < 5; pair++) {
     const first = pair % 2 === 0 ? base : 4 * base;

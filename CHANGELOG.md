@@ -2,6 +2,40 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## 4.9.1 - 2026-10-25
+
+- The compact and dense timing gates measure CPU time instead of wall time, so server load no longer fails them (#68).
+  The compact gate adds a 10 s wall ceiling and an event-loop-lag ceiling and retries up to three times on a fresh host
+  and store; the dense gate also bounds CPU growth for 4x input and retries only its wall-time sample.
+- Recall redaction no longer overflows the stack on multi-megabyte input (#65). Lines longer than 64 KiB get a bounded
+  prescan that hides oversized provider keys, bearer values, URL passwords and named values (fail closed); text whose
+  lines all fit the bound gives exactly the earlier output. A regex overflow in `replace` is retried on a fallback.
+- The oversized-credential prescan combines its long-run and quote checks, skips impossible JWT candidates and stops
+  after a provider match covers the rest of a line, reducing work on repeated markers without changing bounded-line output.
+- Retention recovers orphaned capture tombstones (#66) in dry runs, cleanup and build-worker runs: a quiet one (no write
+  for an hour, recorded pid dead) is restored when its canonical path is free, one past the retention window is deleted,
+  and one beside an occupied canonical capture is left until it ages out. A capture append re-lists once when a listed
+  segment disappears during a retention rename.
+- Dry-run retention counts a quiet tombstone as restorable when its canonical capture is planned for pruning in the same run (#71).
+- Cleanup checks capture and brief file contents immediately before replacing them, so a brief save made during redaction
+  stays on disk for the next run. Retention atomically moves an old capture directory to a hidden sibling, checks it
+  again and deletes only that moved tree; writers keep using the canonical path, which can be recreated without waiting.
+  A failed directory rename leaves the capture in place.
+- Recall redaction timing gates calibrate repetitions per input shape until the fastest of three base samples uses 20 ms of CPU, reducing timer noise while preserving the 48 KB and 192 KB input sizes and growth threshold.
+- Detached recall build tests wait for the `BUILD_LOCK` owner to exit after records publish before removing temporary indexes.
+- Cleanup and the next build remove every stored vector keyed to a row's pre-redaction text, while keeping vectors for
+  unchanged rows. The dry run reports stale vector records and `--apply` backs up the vector file before dropping
+  them. Vector locks wait at most two seconds and locks older than 30 seconds are taken over, even when the recorded
+  pid is live. Cleanup starts queued builds in vectors mode when the index has a vector file, and reports cutoffs
+  dropped with pruned indexes.
+- Session push now starts its server deadline from the same clock reading as the hook timer, with a 200 ms server
+  margin. The server returns shown keys without saving them; the hook saves them after using its answer, so a timed-out
+  or lost answer does not hide lines from the next prompt. The CLI fallback keeps its existing state-file behavior.
+- Recall timing gates now compare redaction CPU growth and parent event-loop CPU gaps, avoiding wall-time failures under
+  machine load while confirming the detached index build publishes its records.
+- Recall redaction CPU growth is checked per adversarial input shape, so one quadratic pattern cannot be diluted by
+  the other shapes.
+
 ## 4.9.0 - 2026-10-24
 
 - Each gating hook (prompt.submit, session.compact, classic.PreToolUse, classic.PostToolUse, classic.Stop) has a

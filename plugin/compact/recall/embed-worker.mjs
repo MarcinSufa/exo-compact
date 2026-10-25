@@ -65,7 +65,12 @@ async function main() {
       for (let i = 0; i < entries.length; i += BATCH) {
         const batch = entries.slice(i, i + BATCH);
         const vectors = await embed(batch.map(([, text]) => PASSAGE + text));
-        appendVectors(file, batch.map(([key], j) => ({ key, vector: vectors[j] })));
+        // 4.9.1: a build or cleanup may redact these rows while the model is embedding them.
+        let currentKeys;
+        appendVectors(file, batch.map(([key], j) => ({ key, vector: vectors[j] })), ({ key }) => {
+          currentKeys ??= new Set(currentRows().rows.map((row) => textKey(row.text)));
+          return currentKeys.has(key);
+        });
       }
       if (entries.length) log(`generation ${current}: embedded ${entries.length} of ${rows.length} chunks in ${Math.round((Date.now() - started) / 1000)} s`);
       done = current;

@@ -19,7 +19,7 @@ import { pushForPrompt } from './session-push.mjs';
 import { hash } from './shared.mjs';
 
 export const PUSH_POINTER = 'push-server.json';
-/** The hook's state file name (core/session-push.ts SESSION_PUSH_FILE): the one file a request may have written. */
+/** The hook's state file name (core/session-push.ts SESSION_PUSH_FILE): read to skip prior lines, then committed by the hook. */
 export const PUSH_STATE_FILE = 's4-session-push.json';
 const REASSERT_MS = 10_000;
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -91,10 +91,10 @@ export async function startPushServer({ recallRoot, sessionId, socketDir = defau
       // A server answers for its own session only: after /clear the hook's session has no server, and spawns.
       if (input?.session !== session) return reply(409, 'null');
       if (typeof input.prompt !== 'string') return reply(400, 'null');
-      // The server writes this file for a token holder: only an absolute path to the hook's state file name.
+      // The hook reads and commits this file: only an absolute path to the hook's state file name.
       if (input.stateFile !== undefined && (typeof input.stateFile !== 'string' || !path.isAbsolute(input.stateFile) || path.basename(input.stateFile) !== PUSH_STATE_FILE)) return reply(400, 'null');
       const deadline = typeof input.deadline === 'number' && Number.isFinite(input.deadline) ? input.deadline : Infinity;
-      try { reply(200, JSON.stringify(pushForPrompt(recallRoot, session, input.prompt, input.stateFile, rare, deadline))); } catch { reply(500, 'null'); }
+      try { reply(200, JSON.stringify(pushForPrompt(recallRoot, session, input.prompt, input.stateFile, rare, deadline, false))); } catch { reply(500, 'null'); }
     });
   });
   const listening = await new Promise((resolve) => {

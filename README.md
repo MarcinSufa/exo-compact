@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-4.9.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-4.9.1-blue">
   <img alt="status" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.278-8A2BE2">

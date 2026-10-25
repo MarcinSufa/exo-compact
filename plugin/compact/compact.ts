@@ -35,7 +35,7 @@ import { sha256 } from './host/sha256.js';
 import { forkReply, type ForkReply, CARD_CUT_SHARE, CARD_TASK_SHARE, CARD_TOTAL_BUDGET_TOKENS, cardBudgets, stretchForTail, TASK_CARD_FILE, TASK_CARD_MAX_TOKENS, TASK_CARD_STATE_FILE, TASK_CARD_BRIEF_FILE, TASK_CARD_HORIZON_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardCheckReason, renderCardPrompt, renderCardSection } from './core/task-card.js';
 import { parseRuleCheck, parseRuleSkip, ruleSkipWarning, parseSeenRules, renderRuleCheckReason, renderSeenRules, RULE_CHECK_SEEN_FILE, RULE_CHECK_TIMEOUT_MS, rulesToBlock } from './core/rule-check.js';
 import { BRIEF_CHECK_ARMED, BRIEF_CHECK_DONE, BRIEF_CHECK_EMPTY, BRIEF_CHECK_FILE, BRIEF_CHECK_TIMEOUT_MS, parseBriefCheck, renderBriefCheckReason } from './core/brief-check.js';
-import { SESSION_PUSH_FILE, SESSION_PUSH_POINTER, SESSION_PUSH_SERVER_TIMEOUT_MS, SESSION_PUSH_TIMEOUT_MS, parsePushPointer, parseSessionPush, renderSessionPush, type SessionPushFound } from './core/session-push.js';
+import { SESSION_PUSH_FILE, SESSION_PUSH_POINTER, SESSION_PUSH_SERVER_DEADLINE_MARGIN_MS, SESSION_PUSH_SERVER_TIMEOUT_MS, SESSION_PUSH_TIMEOUT_MS, parsePushPointer, parseSessionPush, renderSessionPush, type SessionPushFound } from './core/session-push.js';
 import { BRIEF_LIMITS_TIMEOUT_MS, BRIEF_PUSH_ARMED, BRIEF_PUSH_FILE, BRIEF_PUSH_OFF, BRIEF_PUSH_TIMEOUT_MS, parseBriefLimits, parseBriefPush, pushTarget, renderBriefLimits, renderBriefPush, type BriefPushInput } from './core/brief-push.js';
 import { FRESH_CUT_FILE, FRESH_CUT_ANSWERED, FRESH_CUT_OPEN, hasLiveSeed, isClassifierRefusal, REFUSAL_GUARD_FILE, REFUSAL_GUARD_NOTICE, renderRefusalGuardState } from './core/refusal-guard.js';
 import { findTranscriptPath } from './host/transcript-path.js';
@@ -400,7 +400,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // 3.43.0: on by default (ctxbench Haiku: 33/39 without it, 37/39 with it, ~1.2k tokens over 125 turns).
     const sessionPushOn = pushText !== undefined && optionBoolean(options, 'recallEnabled', true) && optionBoolean(options, 'sessionPush', true);
     if (briefPushOn || sessionPushOn) {
-      const pushHost: BriefPushHost = { cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), home: homeDir, inert: () => preflight.inert, pluginRoot: () => $.env.get('CLAUDE_PLUGIN_ROOT'), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line), fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; socketPath: string }) => $.http.fetch(url, init), after: (ms: number, fn: () => void) => $.clock.after(ms, fn), now: () => $.clock.now() };
+      const pushHost: BriefPushHost = { cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), home: homeDir, inert: () => preflight.inert, pluginRoot: () => $.env.get('CLAUDE_PLUGIN_ROOT'), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line), fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; socketPath: string }) => $.http.fetch(url, init), after: (ms: number, fn: () => void) => $.clock.after(ms, fn), now: () => $.clock.now() };
       const pluginRootOption = optionString(options, 'recallPluginRoot', '');
       return Promise.all([
         briefPushOn ? runBriefPush(pushHost, { prompt: pushText! }, pluginRootOption) : Promise.resolve(undefined),
@@ -1696,6 +1696,7 @@ type BriefPushHost = {
   id: () => Promise<string>;
   exists: (path: string) => Promise<boolean>;
   read: (path: string) => Promise<string>;
+  write?: (path: string, text: string) => Promise<void>;
   home: () => Promise<string | undefined>;
   /** True after a failed SessionStart preflight (host/preflight.ts). */
   inert: () => boolean;
@@ -1754,12 +1755,24 @@ async function runSessionPush(host: BriefPushHost, prompt: string, pluginRootOpt
       found = ran.exitCode === 0 ? parseSessionPush(String(ran.stdout)) : undefined;
       if (served === 'failed') via = ' via=spawn';
     }
+    const note = found ? renderSessionPush(found) : undefined;
+    if (via === ' via=server' && found && note) await markSessionPushShown(host, statePath, found);
     host.log(`session_push.fired=${found ? 1 : 0}${found ? ` lines=${found.lines.length} chars=${found.text.length} cuts=${found.cuts}` : ''}${via}`);
-    return found ? renderSessionPush(found) : undefined;
+    return note;
   } catch (error) {
     host.log(`session_push.fired=0 reason=error error=${errorTail(error)}`);
     return undefined;
   }
+}
+
+/** 4.9.1: only the hook that uses a server answer records its shown keys; the CLI keeps its own write path. */
+async function markSessionPushShown(host: BriefPushHost, statePath: string, found: SessionPushFound): Promise<void> {
+  const keys = found.lines.map((line) => line.key).filter((key): key is string => typeof key === 'string' && key.length > 0);
+  if (!host.write || !keys.length) return;
+  let previous: { cuts?: number; shown?: unknown } = {};
+  try { const value = JSON.parse(await host.read(statePath)); if (value && typeof value === 'object') previous = value; } catch { /* a new cut has no state yet */ }
+  const shown = previous.cuts === found.cuts && Array.isArray(previous.shown) ? previous.shown.filter((key): key is string => typeof key === 'string') : [];
+  try { await host.write(statePath, JSON.stringify({ cuts: found.cuts, shown: [...shown, ...keys] })); } catch { /* a later prompt may try the line again */ }
 }
 
 /**
@@ -1767,7 +1780,7 @@ async function runSessionPush(host: BriefPushHost, prompt: string, pluginRootOpt
  * which saves starting node and preparing the index for every prompt. Resolves undefined when the session has no
  * server pointer (the hook spawns), 'failed' when the pointer is broken or the server refused or is gone (the hook
  * spawns), 'timeout' when the server took too long (given up for this prompt: a spawned search would race it for the
- * state file; the request's deadline keeps the server from marking those lines shown), or the server's answer.
+ * state file; the server never commits shown keys), or the server's answer.
  */
 async function askPushServer(host: BriefPushHost, recallRoot: string, sessionId: string, request: { session: string; prompt: string; stateFile: string }): Promise<{ found: SessionPushFound | undefined } | 'failed' | 'timeout' | undefined> {
   const fetch = host.fetch, after = host.after, now = host.now;
@@ -1778,10 +1791,13 @@ async function askPushServer(host: BriefPushHost, recallRoot: string, sessionId:
   try { pointer = parsePushPointer(await host.read(pointerPath)); } catch { return 'failed'; }
   if (!pointer) return 'failed';
   let timer: { cancel: () => void } | undefined;
-  const timeout = new Promise<'timeout'>((resolve) => { timer = after(SESSION_PUSH_SERVER_TIMEOUT_MS, () => resolve('timeout')); });
   try {
+    const startedAt = await now();
+    const hookDeadline = startedAt + SESSION_PUSH_SERVER_TIMEOUT_MS;
+    const deadline = hookDeadline - SESSION_PUSH_SERVER_DEADLINE_MARGIN_MS;
+    const timeout = new Promise<'timeout'>((resolve) => { timer = after(hookDeadline - startedAt, () => resolve('timeout')); });
     const response = await Promise.race([
-      fetch('http://recall/session-push', { method: 'POST', headers: { 'content-type': 'application/json', 'x-exo-token': pointer.token }, body: JSON.stringify({ ...request, deadline: (await now()) + SESSION_PUSH_SERVER_TIMEOUT_MS }), socketPath: pointer.socket }),
+      fetch('http://recall/session-push', { method: 'POST', headers: { 'content-type': 'application/json', 'x-exo-token': pointer.token }, body: JSON.stringify({ ...request, deadline }), socketPath: pointer.socket }),
       timeout,
     ]);
     if (response === 'timeout') return 'timeout';

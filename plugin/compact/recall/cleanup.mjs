@@ -8,30 +8,36 @@
 //     an index built by an older redactor keeps the keys the current patterns catch, and only rows carried into a new
 //     build were redacted again;
 //   - redacts the text files of every capture directory it keeps (segments, the work log, the task card, notices,
-//     adopted files). Capture writes take no lock, so a capture written in the last hour is left for a later run, a
-//     capture that changed or gained a file since the plan is left whole, and each file is read again right before
+//     adopted files). Redaction takes no lock against hook writers, so a capture written in the last hour is left for a
+//     later run, a capture that changed or gained a file since the plan is left whole, and each file is read again right before
 //     its rename; a symlinked capture root is not followed, and the session running the command
 //     (CLAUDE_CODE_SESSION_ID) keeps its capture and index;
 //   - deletes the index (<home>/.claude/exovault/recall/<sha>) and the capture directory (<root>/.exovault/s4-capture/<id>)
 //     of every session untouched for more than N days (default 30, Claude Code's own default for keeping transcripts;
-//     0 keeps everything). --capture-root adds a project that holds its own .exovault (an enable flag there).
+//     0 keeps everything). Captures are atomically renamed aside, checked for fresh writes again, then deleted; a writer
+//     to the canonical path creates a new directory. When retention is on, each run plans recovery of hidden tombstones beside
+//     scanned capture roots: live pids under 10 minutes are skipped, only quiet trees with dead pids are restored when the canonical
+//     path is free, non-quiet trees are left for later, and old trees are deleted. The dry run counts each result. --capture-root adds a project
+//     that holds its own .exovault (an enable flag there).
 // A session whose build holds BUILD_LOCK is skipped; the lock is taken for every index the run changes. A session counts
 // as touched by its newest file in either store, so an old index stays while its session still writes captures.
 // Redaction here never shortens a file (redactAll): a brief or checklist keeps every line.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { hash, redactAll } from './shared.mjs';
-import { homeDir, recallRootDir } from './paths.mjs';
+import { homeDir, recallRootDir, claudeProjectsDir } from './paths.mjs';
+import { countVectors, dropVectorsLocked, takeVectorLock, textKey, vectorFile } from './vectors.mjs';
 
 export const DEFAULT_RETENTION_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SESSION_DIR = /^[0-9a-f]{64}$/;
 const GENERATION_DIR = /^generation-\d+$/;
 const STAMP = '.retention-stamp';
-/** A capture written more recently than this may belong to a live session (capture writes take no lock): not redacted. */
+const TOMBSTONE_ACTIVE_MS = 10 * 60 * 1000;
+/** A recent capture may belong to a live session; redaction does not lock hook writers. */
 const CAPTURE_QUIET_MS = 60 * 60 * 1000;
 const CAPTURE_KINDS = { '.json': 'json', '.jsonl': 'jsonl', '.md': 'text', '.brief': 'text', '.log': 'text', '.txt': 'text' };
 
@@ -53,7 +59,7 @@ function newestMtime(dir) {
     for (const entry of listDir(current)) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name !== 'BUILD_LOCK') try { newest = Math.max(newest, fs.lstatSync(full).mtimeMs); } catch {}
+      else if (!['BUILD_LOCK', 'VECTOR_LOCK'].includes(entry.name)) try { newest = Math.max(newest, fs.lstatSync(full).mtimeMs); } catch {}
     }
   };
   walk(dir);
@@ -155,17 +161,19 @@ function redactFile(file, kind, raw) {
   let text, rows = 0;
   const keep = KEEP_FIELDS[path.basename(file)];
   if (kind === 'records') {
-    let records;
+    let records, vectorKeys = [];
     try { records = JSON.parse(raw); } catch { return undefined; }
     if (!Array.isArray(records)) return undefined;
     // The text and the tool path: a path can name a key too (a token in a directory or query).
     text = JSON.stringify(records.map((row) => {
+      if (typeof row?.text === 'string' && redactAll(row.text) !== row.text) vectorKeys.push(textKey(row.text));
       const fields = ['text', 'filePath'].filter((field) => typeof row?.[field] === 'string' && redactAll(row[field]) !== row[field]);
       if (!fields.length) return row;
       rows += 1;
       return { ...row, ...Object.fromEntries(fields.map((field) => [field, redactAll(row[field])])) };
     }));
     if (!rows) return undefined;
+    if (vectorKeys.length) return { text, rows, raw, vectorKeys };
   } else if (kind === 'json') {
     let value;
     // A capture segment is named .json but holds one record per line (host/fs-adapter.ts): read it as JSON lines.
@@ -188,7 +196,7 @@ function redactFile(file, kind, raw) {
  */
 function planFile(item) {
   const found = redactFile(item.file, item.kind);
-  return found ? { ...item, rows: found.rows, rawHash: hash(found.raw) } : undefined;
+  return found ? { ...item, rows: found.rows, rawHash: hash(found.raw), ...(found.vectorKeys?.length ? { vectorKeys: found.vectorKeys } : {}) } : undefined;
 }
 
 /** Every file of one session index that may hold session text, with how to redact it. */
@@ -245,6 +253,128 @@ function treeState(dir) {
 /** A capture root the run may read: a real directory, and not reached through a symlinked .exovault either. */
 const realCaptureDir = (dir) => [dir, path.dirname(dir)].every((part) => { try { return !fs.lstatSync(part).isSymbolicLink(); } catch { return false; } });
 
+// 4.9.1: retention runs recover orphaned tombstones left between the rename and final remove.
+function statIfPresent(file) {
+  try { return fs.lstatSync(file); } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return null;
+    return undefined;
+  }
+}
+
+/** A tombstone sibling is safe to scan only below real directories; the capture root itself may be absent. */
+function safeCaptureRoot(captureRoot) {
+  for (const dir of [path.dirname(captureRoot), path.dirname(path.dirname(captureRoot))]) {
+    const stat = statIfPresent(dir);
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) return false;
+  }
+  const stat = statIfPresent(captureRoot);
+  return stat === null || Boolean(stat?.isDirectory() && !stat.isSymbolicLink());
+}
+
+function pidIsAlive(pid) {
+  if (!(pid > 0 && Number.isSafeInteger(pid))) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+/** Find old captures left beside each root by a previous process. A missing canonical root is still scanned. */
+function planTombstones(captureRoots, { cutoff, now, sessionId, prunedCaptures = new Set() }) {
+  if (!(cutoff > -Infinity)) return [];
+  const ownCapture = sessionId === undefined ? undefined : captureName(sessionId);
+  const seen = new Set(), planned = [];
+  for (const captureRoot of new Set(captureRoots.map((root) => path.resolve(root)))) {
+    if (!safeCaptureRoot(captureRoot)) continue;
+    const parent = path.dirname(captureRoot);
+    for (const entry of listDir(parent)) {
+      if (!entry.isDirectory()) continue;
+      const match = /^\.([A-Za-z0-9._-]+)\.retention-(\d+)-(\d+)-(\d+)$/.exec(entry.name);
+      if (!match) continue;
+      const dir = path.join(parent, entry.name);
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      const stat = statIfPresent(dir);
+      if (!stat?.isDirectory() || stat.isSymbolicLink()) continue;
+      const [, id, pidText, timeText] = match;
+      const pid = Number(pidText), namedAt = Number(timeText), canonical = path.join(captureRoot, id);
+      let action;
+      if (id === ownCapture || (pidIsAlive(pid) && now - namedAt < TOMBSTONE_ACTIVE_MS)) action = 'skip';
+      else {
+        const newest = newestMtime(dir);
+        if (newest < cutoff) action = 'delete';
+        else {
+          const canonicalStat = prunedCaptures.has(path.resolve(canonical)) ? null : statIfPresent(canonical);
+          if (canonicalStat === null && !pidIsAlive(pid) && newest < now - CAPTURE_QUIET_MS) action = 'restore';
+          // The canonical tree was re-derived from the transcript and is the current state, so mixing in older files would let stale records win.
+          else if (canonicalStat) action = 'left';
+          else action = 'left';
+        }
+      }
+      planned.push({ dir, canonical, id, pid, namedAt, action, bytes: sizeOf(dir) });
+    }
+  }
+  return planned;
+}
+
+function tombstoneCounts(tombstones) {
+  const counts = { restored: 0, deleted: 0, left: 0, skipped: 0 };
+  for (const item of tombstones) {
+    if (item.action === 'restore') counts.restored += 1;
+    else if (item.action === 'delete') counts.deleted += 1;
+    else if (item.action === 'left') counts.left += 1;
+    else if (item.action === 'skip') counts.skipped += 1;
+  }
+  return counts;
+}
+
+/** Apply a planned tombstone action after re-checking its age, owner and canonical path. */
+function recoverTombstone(item, cutoff, now, sessionId) {
+  const stat = statIfPresent(item.dir);
+  if (!stat?.isDirectory() || stat.isSymbolicLink()) return { outcome: 'skipped', bytes: 0 };
+  if (!safeCaptureRoot(path.dirname(item.canonical))) return { outcome: 'left', bytes: 0 };
+  if (item.id === (sessionId === undefined ? undefined : captureName(sessionId))) return { outcome: 'skipped', bytes: 0 };
+  if (pidIsAlive(item.pid) && now - item.namedAt < TOMBSTONE_ACTIVE_MS) return { outcome: 'skipped', bytes: 0 };
+  const old = newestMtime(item.dir) < cutoff;
+  if (old && item.action === 'delete') {
+    try { fs.rmSync(item.dir, { recursive: true }); return { outcome: 'deleted', bytes: item.bytes }; }
+    catch { return { outcome: 'left', bytes: 0 }; }
+  }
+  if (old) return { outcome: 'left', bytes: 0 };
+  const newest = newestMtime(item.dir);
+  if (pidIsAlive(item.pid) || newest >= now - CAPTURE_QUIET_MS) return { outcome: 'left', bytes: 0 };
+  let canonicalStat = statIfPresent(item.canonical);
+  if (canonicalStat === null) {
+    const captureRoot = path.dirname(item.canonical);
+    try { fs.mkdirSync(captureRoot, { mode: 0o700 }); } catch {}
+    const rootStat = statIfPresent(captureRoot);
+    if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return { outcome: 'left', bytes: 0 };
+    canonicalStat = statIfPresent(item.canonical);
+    if (canonicalStat === null) {
+      // 4.9.1: check again immediately before the move and verify it. Node has no cross-platform no-replace directory rename;
+      // a writer's first write after an hour of silence can still race in the same milliseconds and replace an empty directory.
+      if (statIfPresent(item.canonical) !== null || pidIsAlive(item.pid) || newestMtime(item.dir) >= now - CAPTURE_QUIET_MS) return { outcome: 'left', bytes: 0 };
+      try {
+        fs.renameSync(item.dir, item.canonical);
+        return newestMtime(item.canonical) === newest
+          ? { outcome: 'restored', bytes: 0 }
+          : { outcome: 'left', bytes: 0 };
+      }
+      catch { return { outcome: 'left', bytes: 0 }; }
+    }
+  }
+  if (!canonicalStat) return { outcome: 'left', bytes: 0 };
+  // The canonical tree was re-derived from the transcript and is the current state, so mixing in older files would let stale records win.
+  return { outcome: 'left', bytes: 0 };
+}
+
+function recoverTombstones(tombstones, cutoff, now, sessionId, counts) {
+  let deletedBytes = 0;
+  for (const item of tombstones) {
+    const result = recoverTombstone(item, cutoff, now, sessionId);
+    if (result.outcome in counts) counts[result.outcome] += 1;
+    deletedBytes += result.bytes;
+  }
+  return deletedBytes;
+}
+
 /**
  * The raw session id of an index, from its ACTIVE marker (every turn writes it) or its manifests, or undefined: only an
  * id that hashes to the index directory's name counts.
@@ -268,18 +398,18 @@ function freshCheck(prune, cutoff) {
   const bySession = new Map();
   for (const item of prune) for (const session of item.sessions) bySession.set(session, [...(bySession.get(session) ?? []), item]);
   const unlinked = prune.filter((item) => item.unlinked);
-  return (item) => item.sessions.some((session) => bySession.get(session).some((other) => newestMtime(other.dir) >= cutoff))
-    || (item.kind === 'capture' && unlinked.some((other) => newestMtime(other.dir) >= cutoff));
+  return (item) => item.sessions.some((session) => bySession.get(session).some((other) => fs.existsSync(other.dir) && newestMtime(other.dir) >= cutoff))
+    || (item.kind === 'capture' && unlinked.some((other) => fs.existsSync(other.dir) && newestMtime(other.dir) >= cutoff));
 }
 
 /**
- * What a run would do: { redact: [{ dir, files: [{ file, kind, brief, rows, text }] }], prune: [{ dir, kind, bytes, sessions, unlinked }], busy }.
+ * What a run would do: { redact: [{ dir, files: [{ file, kind, brief, rows, text }] }], prune: [{ dir, kind, bytes, sessions, unlinked }], tombstones, busy }.
  * `sessions` are the index directory names the item belongs to (a capture name two session ids share belongs to both).
  * `captureDirs` are .exovault/s4-capture directories; `sessionId` (the session running this) is never pruned. With
  * `locked` (the index directory names this process holds the lock of), every other index counts as busy.
  */
 export function plan({ recallRoot, captureDirs = [], days, now = Date.now(), sessionId, redactData = true, locked }) {
-  const result = { redact: [], prune: [], busy: 0, recentCaptures: 0 };
+  const result = { redact: [], prune: [], tombstones: [], busy: 0, recentCaptures: 0 };
   const cutoff = days > 0 ? now - days * DAY_MS : -Infinity;
   const own = sessionId === undefined ? undefined : hash(String(sessionId));
   // Newest file per session in each store, by index directory name (a capture is named by its session id).
@@ -311,11 +441,17 @@ export function plan({ recallRoot, captureDirs = [], days, now = Date.now(), ses
     if (entry.name !== own && touched.get(entry.name) < cutoff) { result.prune.push({ dir, kind: 'index', bytes: sizeOf(dir), sessions: [entry.name], unlinked: !linked.has(entry.name) }); continue; }
     if (!redactData) continue;
     const files = indexFiles(dir).map(planFile).filter(Boolean);
-    if (files.length) result.redact.push({ dir, files });
+    if (files.length) {
+      const vectorKeys = new Set(files.flatMap((item) => item.vectorKeys ?? []));
+      result.redact.push({ dir, files, vectorKeys: [...vectorKeys], vectors: countVectors(vectorFile(dir), vectorKeys) });
+    }
   }
   const ownCapture = sessionId === undefined ? undefined : captureName(sessionId);
   // An older worker leaves ACTIVE empty, so before its first manifest a live build cannot be paired with its capture.
-  if ([...busySessions].some((session) => !linked.has(session))) return result;
+  if ([...busySessions].some((session) => !linked.has(session))) {
+    result.tombstones = planTombstones(captureDirs, { cutoff, now, sessionId });
+    return result;
+  }
   for (const capture of captures) {
     // A build holding the lock means the session is live: its capture stays with its index.
     if (capture.name === ownCapture || capture.sessions.some((session) => busySessions.has(session))) continue;
@@ -329,20 +465,49 @@ export function plan({ recallRoot, captureDirs = [], days, now = Date.now(), ses
     if (newestMtime(capture.dir) >= now - CAPTURE_QUIET_MS) result.recentCaptures += 1;
     else result.redact.push({ dir: capture.dir, files, capture: true, state: treeState(capture.dir) });
   }
+  // 4.9.1: a quiet tombstone can be restored after this run prunes its canonical capture.
+  const prunedCaptures = new Set(result.prune.filter((item) => item.kind === 'capture').map((item) => path.resolve(item.dir)));
+  result.tombstones = planTombstones(captureDirs, { cutoff, now, sessionId, prunedCaptures });
   return result;
 }
 
+// 4.9.1: compare a capture or brief rewrite with the text it redacted, so a newer write stays for the next run.
 function writeAtomic(file, text, stillRaw) {
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, text, { mode: 0o600 });
-  // Capture writes take no lock: the file is read once more right before the rename, and a write that landed since the
-  // redaction keeps its text (the rename would replace it). What is left is the gap between this read and the rename.
+  // A write that landed since the redaction keeps its text; brief saves share no lock with cleanup.
   if (stillRaw !== undefined) {
     let now;
     try { now = fs.readFileSync(file, 'utf8'); } catch { now = undefined; }
     if (now !== stillRaw) { fs.rmSync(temp, { force: true }); return false; }
   }
   fs.renameSync(temp, file);
+  return true;
+}
+
+let tombstoneSerial = 0;
+/** A hidden sibling of the capture root, outside the paths hooks write to. */
+function captureTombstone(dir) {
+  const captureRoot = path.dirname(dir);
+  const parent = path.dirname(captureRoot);
+  let tombstone;
+  do {
+    tombstone = path.join(parent, `.${path.basename(dir)}.retention-${process.pid}-${Date.now()}-${++tombstoneSerial}`);
+  } while (fs.existsSync(tombstone));
+  return tombstone;
+}
+
+// 4.9.1: detach the old capture directory from the hook path before the final freshness check.
+/** Move the old tree out of the writer's path, then re-check the moved tree and linked sessions before deleting it. */
+function deleteCapture(item, cutoff, fresh, beforeCaptureDelete) {
+  const tombstone = captureTombstone(item.dir);
+  try { fs.renameSync(item.dir, tombstone); } catch { return false; }
+  if (newestMtime(tombstone) >= cutoff || fresh(item)) {
+    try { if (!fs.existsSync(item.dir)) fs.renameSync(tombstone, item.dir); } catch { /* keep the moved data if a writer recreated the path */ }
+    return false;
+  }
+  beforeCaptureDelete?.(item.dir);
+  fs.rmSync(tombstone, { recursive: true, force: true });
   return true;
 }
 
@@ -404,82 +569,162 @@ const summarize = (planned, { apply, days }) => ({
     indexes: planned.redact.filter((item) => !item.capture).length,
     captures: planned.redact.filter((item) => item.capture).length,
     skipped: 0,
+    vectors: planned.redact.reduce((sum, index) => sum + (index.vectors ?? 0), 0),
   },
   recentCaptures: planned.recentCaptures,
   prune: {
     indexes: planned.prune.filter((item) => item.kind === 'index').length,
     captures: planned.prune.filter((item) => item.kind === 'capture').length,
-    bytes: planned.prune.reduce((sum, item) => sum + item.bytes, 0),
+    bytes: planned.prune.reduce((sum, item) => sum + item.bytes, 0) + planned.tombstones.filter((item) => item.action === 'delete').reduce((sum, item) => sum + item.bytes, 0),
+    tombstones: tombstoneCounts(planned.tombstones),
   },
   busy: planned.busy,
+  cutoffs: { resumed: 0, dropped: 0, pending: 0 },
   backup: null,
 });
 
+function queuedCutoff(dir) {
+  try { const cutoff = Number(fs.readFileSync(path.join(dir, 'PENDING_CUTOFF'), 'utf8').trim()); return Number.isFinite(cutoff) && cutoff > 0 ? cutoff : 0; } catch { return 0; }
+}
+
+function sessionTranscript(home, sessionId) {
+  if (!sessionId || path.basename(sessionId) !== sessionId || sessionId === '.' || sessionId === '..') return undefined;
+  const projects = claudeProjectsDir(process.env, home);
+  for (const entry of listDir(projects)) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(projects, entry.name, `${sessionId}.jsonl`);
+    try { if (fs.statSync(file).isFile()) return file; } catch {}
+  }
+  return undefined;
+}
+
 /** The cleanup run: a dry run unless `apply`. Returns the summary. */
-export function cleanup({ home = homeDir(), recallRoot = recallRootDir(process.env, home), captureDirs, days = DEFAULT_RETENTION_DAYS, apply = false, now = Date.now(), sessionId, afterBackup, beforeRewrite } = {}) {
+export function cleanup({ home = homeDir(), recallRoot = recallRootDir(process.env, home), captureDirs, days = DEFAULT_RETENTION_DAYS, apply = false, now = Date.now(), sessionId, afterBackup, beforeRewrite, beforeCaptureDelete } = {}) {
   const captures = captureDirs ?? [path.join(home, '.exovault', 's4-capture')];
   if (!apply) return summarize(plan({ recallRoot, captureDirs: captures, days, now, sessionId }), { apply, days });
   // Locks first, so nothing a build writes lands between the plan, the backup and the rewrite.
-  const releases = [], locked = new Set();
+  const releases = [], vectorReleases = [], locked = new Set(), lockedSessions = new Map();
   for (const entry of listDir(recallRoot)) {
     if (!entry.isDirectory() || !SESSION_DIR.test(entry.name)) continue;
-    const release = takeLock(path.join(recallRoot, entry.name));
-    if (release) { releases.push(release); locked.add(entry.name); }
+    const dir = path.join(recallRoot, entry.name), release = takeLock(dir);
+    if (release) { releases.push(release); locked.add(entry.name); lockedSessions.set(entry.name, indexSessionId(dir)); }
   }
+  let summary;
+  const pruned = new Set();
   try {
+    for (const name of locked) {
+      const release = takeVectorLock(path.join(recallRoot, name));
+      if (!release) throw new Error(`could not lock vectors for ${name}`);
+      vectorReleases.push(release);
+    }
     const planned = plan({ recallRoot, captureDirs: captures, days, now, sessionId, locked });
-    const summary = summarize(planned, { apply, days });
-    const entries = [...planned.redact.flatMap((index) => index.files.map((item) => item.file)), ...planned.prune.map((item) => item.dir)];
-    if (!entries.length) return summary;
-    const file = backupPath(home, now);
-    writeBackup(file, entries, home);
-    summary.backup = { file, files: entries.length };
-    afterBackup?.();
-    const skip = (count) => { summary.redact.skipped += count; summary.redact.files -= count; };
-    for (const index of planned.redact) {
-      // A capture a session wrote to since the plan (a changed or a new file) is live again: none of its files is
-      // rewritten, and the next run redacts it.
-      if (index.capture && treeState(index.dir) !== index.state) { skip(index.files.length); summary.redact.captures -= 1; continue; }
-      let rewritten = 0;
-      for (const item of index.files) {
-        if (index.capture && !unchanged(item)) { skip(1); continue; }
-        let raw;
-        try { raw = fs.readFileSync(item.file, 'utf8'); } catch { skip(1); continue; }
-        if (index.capture && hash(raw) !== item.rawHash) { skip(1); continue; }
-        const fresh = redactFile(item.file, item.kind, raw);
-        if (!fresh) continue;
-        beforeRewrite?.(item.file);
-        if (writeAtomic(item.file, fresh.text, index.capture ? raw : undefined)) rewritten += 1; else skip(1);
+    summary = summarize(planned, { apply, days });
+    const entries = [
+      ...planned.redact.flatMap((index) => [...index.files.map((item) => item.file), ...(index.vectors ? [vectorFile(index.dir)] : [])]),
+      ...planned.prune.map((item) => item.dir),
+      ...planned.tombstones.filter((item) => item.action === 'delete').map((item) => item.dir),
+    ];
+    summary.prune.tombstones = { restored: 0, deleted: 0, left: 0, skipped: 0 };
+    summary.prune.bytes -= planned.tombstones.filter((item) => item.action === 'delete').reduce((sum, item) => sum + item.bytes, 0);
+    if (entries.length) {
+      const file = backupPath(home, now);
+      writeBackup(file, entries, home);
+      summary.backup = { file, files: entries.length };
+      afterBackup?.();
+      const skip = (count, item) => {
+        summary.redact.skipped += count;
+        summary.redact.files -= count;
+        if (item?.brief) summary.redact.briefs -= count;
+      };
+      let vectorsDropped = 0;
+      for (const index of planned.redact) {
+        // A capture a session wrote to since the plan (a changed or a new file) is live again: none of its files is
+        // rewritten, and the next run redacts it.
+        if (index.capture && treeState(index.dir) !== index.state) { skip(index.files.length); summary.redact.captures -= 1; continue; }
+        let rewritten = 0;
+        const vectorKeys = new Set();
+        for (const item of index.files) {
+          if (index.capture && !unchanged(item)) { skip(1, item); continue; }
+          let raw;
+          try { raw = fs.readFileSync(item.file, 'utf8'); } catch { skip(1, item); continue; }
+          if (index.capture && hash(raw) !== item.rawHash) { skip(1, item); continue; }
+          const fresh = redactFile(item.file, item.kind, raw);
+          if (!fresh) continue;
+          beforeRewrite?.(item.file);
+          const compareRaw = index.capture || path.dirname(item.file) === path.join(index.dir, 'briefs');
+          if (writeAtomic(item.file, fresh.text, compareRaw ? raw : undefined)) {
+            rewritten += 1;
+            for (const key of fresh.vectorKeys ?? []) vectorKeys.add(key);
+          } else skip(1, item);
+        }
+        if (!index.capture && vectorKeys.size) vectorsDropped += dropVectorsLocked(vectorFile(index.dir), vectorKeys);
+        if (index.capture && !rewritten) summary.redact.captures -= 1;
       }
-      if (index.capture && !rewritten) summary.redact.captures -= 1;
-    }
-    const fresh = freshCheck(planned.prune, now - days * DAY_MS);
-    for (const item of planned.prune) {
-      if (fresh(item)) {
-        summary.prune[item.kind === 'index' ? 'indexes' : 'captures'] -= 1; summary.prune.bytes -= item.bytes;
-        continue;
+      summary.redact.vectors = vectorsDropped;
+      const fresh = freshCheck(planned.prune, now - days * DAY_MS);
+      for (const item of planned.prune) {
+        if (item.kind === 'capture') {
+          const deleted = !fresh(item) && deleteCapture(item, now - days * DAY_MS, fresh, beforeCaptureDelete);
+          if (!deleted) { summary.prune.captures -= 1; summary.prune.bytes -= item.bytes; }
+          continue;
+        }
+        if (fresh(item)) {
+          summary.prune.indexes -= 1; summary.prune.bytes -= item.bytes;
+          continue;
+        }
+        const cutoff = queuedCutoff(item.dir);
+        fs.rmSync(item.dir, { recursive: true, force: true });
+        pruned.add(path.basename(item.dir));
+        if (cutoff) summary.cutoffs.dropped += 1;
       }
-      fs.rmSync(item.dir, { recursive: true, force: true });
     }
+    summary.prune.bytes += recoverTombstones(planned.tombstones, now - days * DAY_MS, now, sessionId, summary.prune.tombstones);
     return summary;
   } finally {
-    for (const release of releases) release();
+    for (const release of vectorReleases.reverse()) release();
+    for (const release of releases.reverse()) release();
+    if (summary) for (const [name, savedId] of lockedSessions) {
+      if (pruned.has(name) || !fs.existsSync(path.join(recallRoot, name))) continue;
+      const dir = path.join(recallRoot, name), cutoff = queuedCutoff(dir);
+      if (!cutoff) continue;
+      const id = savedId ?? indexSessionId(dir);
+      const transcript = sessionTranscript(home, id);
+      if (!transcript) { summary.cutoffs.pending += 1; continue; }
+      try {
+        const worker = fileURLToPath(new URL('./build-worker.mjs', import.meta.url));
+        // 4.9.1: keep dense recall enabled when a queued cutoff resumes on an index that already has vectors.
+        const mode = fs.existsSync(vectorFile(dir)) ? 'vectors' : 'lexical';
+        const child = spawn(process.execPath, [worker, transcript, recallRoot, id, String(cutoff), path.dirname(transcript), mode, 'cut', String(days)], { detached: true, stdio: 'ignore' });
+        child.unref();
+        summary.cutoffs.resumed += 1;
+      } catch { summary.cutoffs.pending += 1; }
+    }
   }
 }
 
 /**
  * The build worker's retention: at most once a day (a stamp in the recall root), deletes the index and home capture
- * directory of every session untouched for more than `days`, never `sessionId`'s. No backup: this is the policy the
- * user set, not a migration. Returns the counts, or null when it did not run.
+ * directory of every session untouched for more than `days`, never `sessionId`'s. Every invocation still recovers
+ * orphaned tombstones. No backup: this is the policy the user set, not a migration. Returns the counts, or null when it did not run.
  */
-export function pruneOld({ recallRoot, captureRoots = [], days, now = Date.now(), sessionId, afterPlan }) {
+export function pruneOld({ recallRoot, captureRoots = [], days, now = Date.now(), sessionId, afterPlan, beforeCaptureDelete }) {
   if (!(days > 0)) return null;
   const stamp = path.join(recallRoot, STAMP);
   // A stamp in the future (the clock went back) counts as stale, or retention would stop until that date.
-  try { const since = now - Number(fs.readFileSync(stamp, 'utf8').trim()); if (since >= 0 && since < DAY_MS) return null; } catch {}
+  let stampedToday = false;
+  try { const since = now - Number(fs.readFileSync(stamp, 'utf8').trim()); stampedToday = since >= 0 && since < DAY_MS; } catch {}
+  if (stampedToday) {
+    // 4.9.1: orphan recovery is not delayed by the daily limit on ordinary index/capture pruning.
+    const tombstones = planTombstones(captureRoots, { cutoff: now - days * DAY_MS, now, sessionId });
+    if (!tombstones.length) return null;
+    const done = { indexes: 0, captures: 0, tombstones: { restored: 0, deleted: 0, left: 0, skipped: 0 } };
+    afterPlan?.();
+    recoverTombstones(tombstones, now - days * DAY_MS, now, sessionId, done.tombstones);
+    return done;
+  }
   try { fs.mkdirSync(recallRoot, { recursive: true, mode: 0o700 }); writeAtomic(stamp, String(now)); } catch { return null; }
   const planned = plan({ recallRoot, captureDirs: captureRoots, days, now, sessionId, redactData: false });
-  const done = { indexes: 0, captures: 0 };
+  const done = { indexes: 0, captures: 0, tombstones: { restored: 0, deleted: 0, left: 0, skipped: 0 } };
   afterPlan?.();
   const fresh = freshCheck(planned.prune, now - days * DAY_MS);
   for (const item of planned.prune) {
@@ -490,12 +735,11 @@ export function pruneOld({ recallRoot, captureRoots = [], days, now = Date.now()
       fs.rmSync(item.dir, { recursive: true, force: true });
       done.indexes += 1;
     } else {
-      // A session that resumed since the plan: keep it. (Capture writes take no lock.)
-      if (fresh(item)) continue;
-      fs.rmSync(item.dir, { recursive: true, force: true });
-      done.captures += 1;
+      // Capture writers take no retention lock; move the old tree off their canonical path before removal.
+      if (!fresh(item) && deleteCapture(item, now - days * DAY_MS, fresh, beforeCaptureDelete)) done.captures += 1;
     }
   }
+  recoverTombstones(planned.tombstones, now - days * DAY_MS, now, sessionId, done.tombstones);
   return done;
 }
 
@@ -512,12 +756,25 @@ function report(summary) {
   const lines = [summary.apply ? 'exo-compact cleanup' : 'exo-compact cleanup (dry run): nothing is changed; run it again with --apply to do it.'];
   const { redact: r, prune: p } = summary;
   lines.push(`redact: ${plural(r.files, 'file')} in ${plural(r.indexes, 'session index')} and ${plural(r.captures, 'capture directory')} ${would}rewritten (${plural(r.rows, 'row')}, ${plural(r.briefs, 'brief')})`);
-  if (r.skipped) lines.push(`changed: ${plural(r.skipped, 'capture file')} written to during the run kept as they were; run it again later`);
+  if (r.vectors) lines.push(`vectors: ${plural(r.vectors, 'stale vector record')} ${would}dropped`);
+  if (r.skipped) lines.push(`changed: ${plural(r.skipped, 'file')} changed during the run; kept as written, run it again later`);
   if (summary.recentCaptures) lines.push(`recent: ${plural(summary.recentCaptures, 'capture directory')} written in the last hour skipped, a session may still be using it; run it again later`);
   lines.push(summary.days > 0
     ? `retention (${summary.days} days): ${plural(p.indexes, 'session index')} and ${plural(p.captures, 'capture directory')} (${human(p.bytes)}) ${would}deleted`
     : 'retention: off (--days 0)');
+  const t = p.tombstones;
+  if (t.restored || t.deleted || t.left || t.skipped) {
+    const parts = [];
+    if (t.restored) parts.push(`${plural(t.restored, 'tombstone')} ${would}restored`);
+    if (t.deleted) parts.push(`${plural(t.deleted, 'tombstone')} ${would}deleted`);
+    if (t.left) parts.push(`${plural(t.left, 'tombstone')} ${would}left for later`);
+    if (t.skipped) parts.push(`${plural(t.skipped, 'tombstone')} ${would}skipped`);
+    lines.push(`retention tombstones: ${parts.join(', ')}`);
+  }
   if (summary.busy) lines.push(`busy: ${plural(summary.busy, 'session index')} skipped, a build holds its lock; run it again later`);
+  if (summary.cutoffs.resumed) lines.push(`queued cutoffs: ${plural(summary.cutoffs.resumed, 'build')} started after cleanup released its lock`);
+  if (summary.cutoffs.dropped) lines.push(`queued cutoffs: ${plural(summary.cutoffs.dropped, 'cutoff')} dropped with a pruned index`);
+  if (summary.cutoffs.pending) lines.push(`queued cutoffs: ${plural(summary.cutoffs.pending, 'cutoff')} left pending because no worker could be started`);
   if (summary.backup) lines.push(`backup: ${summary.backup.file} (${plural(summary.backup.files, 'entry')}); it still holds the original text, delete it once the result looks right`);
   if (summary.apply && (r.files || p.indexes)) lines.push('Restart running sessions: a recall server keeps the text it already loaded in memory.');
   return `${lines.join('\n')}\n`;
