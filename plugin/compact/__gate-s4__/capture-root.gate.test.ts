@@ -57,6 +57,9 @@ describe('capture root', () => {
       env: { get: () => undefined },
       // Only the zero-ms yields resolve; the capture timeout never fires.
       clock: { sleep: (ms: number) => (ms === 0 ? Promise.resolve() : new Promise(() => undefined)), now: () => 0 },
+      // 4.9.2 review: the capture guard runs harden.mjs from the plugin root before any capture write; exit 0 passes.
+      plugin: { name: 'exo-compact', root: '/fake-plugin' },
+      process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
     };
     for (const dir of ['/home/u', '/home/u/work/voice-bench', '/home/u/work/repo']) {
       cwd = dir;

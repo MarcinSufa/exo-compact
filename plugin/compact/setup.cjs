@@ -18,20 +18,21 @@ const target = path.resolve(directory);
 // 4.8.1: the same file host/capture-path.ts writes (CAPTURE_GITIGNORE), so the flag and the captures stay out of git.
 const gitignorePath = path.join(target, ".exovault", ".gitignore");
 const ensureGitignore = () => {
-  if (!fs.existsSync(gitignorePath)) fs.writeFileSync(gitignorePath, "# Written by exo-compact: session captures stay out of git.\n*\n");
+  if (!fs.existsSync(gitignorePath)) fs.writeFileSync(gitignorePath, "# Written by exo-compact: session captures stay out of git.\n*\n", { mode: 0o600 });
 };
 const say = (line) => process.stdout.write(`exo-compact: ${line}\n`);
 if (action === "enable") {
-  fs.mkdirSync(path.dirname(flagPath), { recursive: true });
+  // 4.9.2: owner-only, like the captures that land next to the flag (harden.mjs).
+  fs.mkdirSync(path.dirname(flagPath), { recursive: true, mode: 0o700 });
   fs.rmSync(optOutPath, { force: true });
-  fs.writeFileSync(flagPath, "1");
+  fs.writeFileSync(flagPath, "1", { mode: 0o600 });
   ensureGitignore();
   say(`on for ${target} and below (flag written)`);
 } else if (action === "disable" || action === "optout") {
   const hadFlag = fs.existsSync(flagPath);
   fs.rmSync(flagPath, { force: true });
-  fs.mkdirSync(path.dirname(optOutPath), { recursive: true });
-  fs.writeFileSync(optOutPath, "1");
+  fs.mkdirSync(path.dirname(optOutPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(optOutPath, "1", { mode: 0o600 });
   ensureGitignore();
   say(`off for ${target} and below (opt-out file written${hadFlag ? ", flag removed" : ""})`);
 } else if (action === "optin") {

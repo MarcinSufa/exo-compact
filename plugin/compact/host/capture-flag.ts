@@ -27,6 +27,13 @@ export interface FlagHost {
   home: () => Promise<string | undefined>;
   /** 4.8.0: true when the SessionStart preflight found Node or Claude Code below the minimum; the session stays inert. */
   inert?: () => boolean;
+  /**
+   * 4.9.2 review (CONTRACT S5u): hardens and verifies the store and this session's directory under a picked root
+   * (host/capture-mode.ts makeCaptureGuard); false makes the root unusable, so no capture is written under it. Every
+   * lookup that leads to a capture write passes it, so a root the working directory reaches mid-session is verified
+   * before its first write.
+   */
+  secure?: (root: string) => Promise<boolean>;
 }
 
 export async function isCaptureEnabled(host: FlagHost): Promise<boolean> {
@@ -52,6 +59,12 @@ export async function isCaptureEnabled(host: FlagHost): Promise<boolean> {
  * session off.
  */
 export async function findCaptureRoot(host: FlagHost): Promise<string | null> {
+  const root = await pickCaptureRoot(host);
+  if (root === null || host.secure === undefined) return root;
+  try { return (await host.secure(root)) ? root : null; } catch { return null; }
+}
+
+async function pickCaptureRoot(host: FlagHost): Promise<string | null> {
   if (host.inert?.()) return null;
   const found = await findMarkerRoot(host);
   if (found !== undefined) return found;

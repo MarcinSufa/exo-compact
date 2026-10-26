@@ -59,10 +59,28 @@ function claimDigest(file) {
   try { fs.writeFileSync(file.replace(/\.md$/, '.digest.started'), String(process.pid), { flag: 'wx', mode: 0o600 }); return true; } catch { return false; }
 }
 
-function claudeBin() {
-  if (process.env.EXOVAULT_CLAUDE_BIN) return process.env.EXOVAULT_CLAUDE_BIN;
-  const local = path.join(os.homedir(), '.local', 'bin', 'claude');
-  return fs.existsSync(local) ? local : 'claude';
+/**
+ * 4.9.2 (CONTRACT S5w): the variables a project's settings `env` block could use to run its own code in the child, set
+ * empty (read as unset). The same list as host/node-run.ts SCRUBBED_ENV.
+ */
+export const SCRUBBED_ENV = Object.freeze({
+  NODE_OPTIONS: '', NODE_PATH: '', NODE_REPL_EXTERNAL_MODULE: '', NODE_V8_COVERAGE: '', NODE_EXTRA_CA_CERTS: '',
+  NODE_TLS_REJECT_UNAUTHORIZED: '', LD_PRELOAD: '', LD_AUDIT: '', LD_LIBRARY_PATH: '', DYLD_INSERT_LIBRARIES: '', DYLD_LIBRARY_PATH: '',
+});
+
+/**
+ * 4.9.2 (CONTRACT S5w): the native install (~/.local/bin) or the npm one next to the Node running this script, never a
+ * name looked up on PATH or taken from the environment: a project's settings `env` block reaches this process and can
+ * set both (CLAUDE_CODE_EXECPATH included). undefined when neither exists; the digest is then skipped.
+ */
+export function claudeBin(home = os.homedir(), execPath = process.execPath, exists = fs.existsSync, platform = process.platform) {
+  const name = platform === 'win32' ? 'claude.exe' : 'claude';
+  return [path.join(home, '.local', 'bin', name), path.join(path.dirname(execPath), name)].find((file) => exists(file));
+}
+
+/** The digest child's environment: this process's, scrubbed, with the marker that keeps this plugin's hook out. */
+export function digestEnv(env = process.env) {
+  return { ...env, ...SCRUBBED_ENV, EXOVAULT_BRIEF_CHILD: '1' };
 }
 
 /** argv of the tool-less, plugin-less, session-less child that writes the checklist. */
@@ -76,7 +94,9 @@ function digest(file, model) {
   if (fs.existsSync(out)) return;
   const text = fs.readFileSync(file, 'utf8');
   // EXOVAULT_BRIEF_CHILD keeps this plugin's prompt hook out of the child, so a brief never digests itself.
-  const child = spawn(claudeBin(), digestArgs(model), { cwd: os.tmpdir(), env: { ...process.env, EXOVAULT_BRIEF_CHILD: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const bin = claudeBin();
+  if (bin === undefined) { writeAtomic(err, 'no claude binary in ~/.local/bin or next to node\n'); return; }
+  const child = spawn(bin, digestArgs(model), { cwd: os.tmpdir(), env: digestEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   const timer = setTimeout(() => child.kill('SIGTERM'), DIGEST_TIMEOUT_MS);
   child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -108,7 +128,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (text.trim()) {
         const { file } = saveBrief(root, sessionId, text);
         if (model && !fs.existsSync(file.replace(/\.md$/, '.digest.md')) && claimDigest(file)) {
-          spawn(process.execPath, [fileURLToPath(import.meta.url), 'digest', file, model], { detached: true, stdio: 'ignore' }).unref();
+          spawn(process.execPath, [fileURLToPath(import.meta.url), 'digest', file, model], { detached: true, env: { ...process.env, ...SCRUBBED_ENV }, stdio: 'ignore' }).unref();
         }
       }
     } catch { process.exitCode = 1; }

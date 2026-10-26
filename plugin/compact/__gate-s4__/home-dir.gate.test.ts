@@ -122,7 +122,7 @@ describe('compact.ts resolves the home directory in one place (4.7.0)', () => {
   it('no env read of HOME is left outside the one helper', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('../compact.ts', import.meta.url), 'utf8');
-    expect(source.match(/\$\.env\.get\('HOME'\)/g)?.length ?? 0).toBe(6); // n = the six handlers that build the one resolveHomeDir closure
+    expect(source.match(/\$\.env\.get\('HOME'\)/g)?.length ?? 0).toBe(7); // n = the seven handlers that build the one resolveHomeDir closure (4.9.2: session.start too)
     expect(source).not.toMatch(/\(await \$\.env\.get\('HOME'\)\) \?\? '\.'/);
   });
 });

@@ -56,6 +56,16 @@ function removeStale(dir, prefix) {
 }
 
 /**
+ * The socket of one server. 4.9.2: a Windows pipe name is global to the machine and a pid is easy to guess, so the
+ * name carries 128 random bits; only the owner reads it, from the pointer. A Unix socket sits in an owner-only
+ * directory and keeps a short name for the 107-byte limit.
+ */
+export function socketPath({ platform = process.platform, socketDir, prefix, instance }) {
+  if (platform === 'win32') return `\\\\.\\pipe\\exo-recall-${prefix}-${instance}-${crypto.randomBytes(16).toString('hex')}`;
+  return path.join(socketDir, `${prefix}-${instance}.sock`);
+}
+
+/**
  * Starts the push server of `sessionId`, or resolves null (no session, no private socket directory, a path too long,
  * a listen or pointer failure). `instance` names the socket (the pid; tests run two in one process).
  * Returns { socket, pointer, assert, close, closeSync }: `assert` writes the pointer again when it names another socket,
@@ -67,7 +77,7 @@ export async function startPushServer({ recallRoot, sessionId, socketDir = defau
   const session = String(sessionId);
   const prefix = hash(session).slice(0, 16);
   const windows = platform === 'win32';
-  const socket = windows ? `\\\\.\\pipe\\exo-recall-${prefix}-${instance}` : path.join(socketDir, `${prefix}-${instance}.sock`);
+  const socket = socketPath({ platform, socketDir, prefix, instance });
   if (!windows && (Buffer.byteLength(socket) > SOCKET_MAX_BYTES || !privateDir(socketDir))) return null;
   if (!windows) { removeStale(socketDir, prefix); try { fs.unlinkSync(socket); } catch {} }
   const token = crypto.randomBytes(24).toString('hex');

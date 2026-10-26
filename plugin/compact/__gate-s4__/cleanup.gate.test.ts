@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { hash } from '../recall/shared.mjs';
 import { cleanup, plan, pruneOld } from '../recall/cleanup.mjs';
 import { saveBrief } from '../recall/brief.mjs';
-import { DIM, appendVectors, storedKeys, textKey, vectorFile } from '../recall/vectors.mjs';
+import { DIM, appendVectors, readyStamp, storedKeys, textKey, vectorFile } from '../recall/vectors.mjs';
 import { CAPTURE_GITIGNORE, ensureCaptureGitignore } from '../host/capture-path.js';
 
 // Stored indexes, briefs and captures written before a redactor learned a key shape keep that key on disk; the
@@ -277,7 +277,7 @@ describe('cleanup command: re-redact stored data', () => {
       const runtime = path.join(path.dirname(recallRoot), 'recall-runtime');
       mkdirSync(runtime, { recursive: true });
       writeFileSync(path.join(runtime, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
-      writeFileSync(path.join(runtime, 'READY'), '{}');
+      writeFileSync(path.join(runtime, 'READY'), JSON.stringify(readyStamp()));
       const embedLog = path.join(index, 'embed.log');
       const project = path.join(home, '.claude', 'projects', '-queued');
       mkdirSync(project, { recursive: true });

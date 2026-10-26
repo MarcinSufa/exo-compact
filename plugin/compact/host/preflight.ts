@@ -9,7 +9,7 @@
 export interface PreflightHost {
   /** `$.session.version()`: the release (`base`) or the full version string. */
   claudeVersion: () => Promise<string | undefined>;
-  /** The plugin directory (option `recallPluginRoot`, else CLAUDE_PLUGIN_ROOT). */
+  /** The plugin directory (host/plugin-root.ts trustedPluginRoot: `$.plugin.root`, else the `recallPluginRoot` option). */
   pluginRoot: () => Promise<string | undefined>;
   run: (argv: string[], init: { timeoutMs: number }) => Promise<{ exitCode: number; stdout: string }>;
 }

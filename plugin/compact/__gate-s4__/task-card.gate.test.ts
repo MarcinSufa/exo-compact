@@ -179,6 +179,15 @@ describe('3.47.0 (S4zu) task card refresh', () => {
     expect(h.logs).toContain('task_card.refresh=start ctx=50000 window=80000 n=1');
   });
 
+  it('4.9.2: a key the fork copies into the card is redacted before the card reaches the disk', async () => {
+    const key = 'ghp_CCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    const h = host({ tokens: 50_000, reply: CARD.replace('## Rules\n', `## Rules\n- Push with the token ${key}.\n`) });
+    await handlers()['classic.PostToolUse']!(h, toolDone, pass);
+    await h.replied;
+    expect(cardFile(h)).toContain('- Push with the token [redacted].');
+    expect(cardFile(h)).not.toContain(key);
+  });
+
   it('records next to the card the id of the newest saved brief it was written for (3.48.1)', async () => {
     const index = `/home/u/.claude/exovault/recall/${sha256('s1')}/briefs/briefs.json`;
     const h = host({ tokens: 40_000, files: { [index]: JSON.stringify([{ id: '653bdcf9b439', path: '/r/b.md', chars: 900, at: '2026-10-03T21:14:35.121Z', firstLine: 'Task 3 of 8.' }]) } });

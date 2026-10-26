@@ -39,6 +39,9 @@ function fakeHost(surfaces: string[], env: Record<string, string | undefined> = 
     env: { get: (name: string) => env[name] },
     http: { fetch: async () => ({ ok: false, status: 500, text: '' }) },
     clock: { sleep: async () => undefined, now: () => 0 },
+    // 4.9.2 review: the capture guard runs harden.mjs from the plugin root before any capture write; exit 0 passes.
+    plugin: { name: 'exo-compact', root: '/fake-plugin' },
+    process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
   };
 }
 

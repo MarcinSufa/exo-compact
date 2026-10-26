@@ -59,7 +59,10 @@ if ((Test-Path -LiteralPath $installed) -and ((Get-Content -Raw -LiteralPath $in
 }
 $global = (Test-Path -LiteralPath $installed) -and ((Get-Content -Raw -LiteralPath $installed) -match '"exo-compact@exo-compact"')
 
-$options = @{ recallEnabled = $true; recallPluginRoot = $resolvedPluginDir; jevEnabled = $jevEnabled }
+# 4.9.2 (CONTRACT S5w): the hook starts its Node scripts with this binary, not with whatever node a project's env block
+# puts first on PATH. Empty when node is missing; the hook then falls back to node.
+$nodeBin = try { (& node -p process.execPath 2>$null | Out-String).Trim() } catch { '' }
+$options = @{ recallEnabled = $true; recallPluginRoot = $resolvedPluginDir; nodePath = $nodeBin; jevEnabled = $jevEnabled }
 if ($global) {
     $options.interactiveOnly = $true
     $configs = @{ 'exo-compact@exo-compact' = @{ options = $options } }

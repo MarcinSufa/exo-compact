@@ -186,7 +186,7 @@ async function main() {
   } catch { queryVector = undefined; }
   const found = briefPush(root, sessionId, input, { shown, queryVector });
   if (found && stateFile) {
-    try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify({ brief: found.brief, shown: [...shown, ...found.lines.map((l) => l.line)] })); } catch {}
+    try { fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 }); fs.writeFileSync(stateFile, JSON.stringify({ brief: found.brief, shown: [...shown, ...found.lines.map((l) => l.line)] }), { mode: 0o600 }); } catch {}
   }
   process.stdout.write(JSON.stringify(found ?? null));
 }

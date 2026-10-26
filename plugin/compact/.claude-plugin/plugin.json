@@ -1,6 +1,6 @@
 {
   "name": "exo-compact",
-  "version": "4.9.1",
+  "version": "4.9.2",
   "description": "Fast, deterministic context compaction for Claude Code: a seed built from captured state instead of a model summary, plus local search over the compacted history.",
   "author": {
     "name": "Marcin Sufa"
@@ -37,7 +37,13 @@
     "recallPluginRoot": {
       "type": "string",
       "title": "Recall plugin directory",
-      "description": "Absolute directory of this plugin, used to start the recall index worker. Empty falls back to CLAUDE_PLUGIN_ROOT.",
+      "description": "Absolute directory of this plugin, used only when Claude Code does not report the plugin directory itself. A relative path or one with .. is ignored. The CLAUDE_PLUGIN_ROOT variable is not read.",
+      "default": ""
+    },
+    "nodePath": {
+      "type": "string",
+      "title": "Node.js binary",
+      "description": "Absolute path of the Node.js the plugin runs its own scripts with. The installers record the one that ran them; empty or missing falls back to node on PATH. A relative path or one with .. is ignored.",
       "default": ""
     },
     "interactiveOnly": {

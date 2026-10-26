@@ -93,7 +93,7 @@ export function pushForPrompt(root, sessionId, prompt, stateFile, rare = Number(
   if (Date.now() > deadline) return null;
   if (found && stateFile && saveState) {
     const shown = state.cuts === found.cuts && Array.isArray(state.shown) ? state.shown : [];
-    try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify({ cuts: found.cuts, shown: [...shown, ...found.lines.map((l) => l.key)] })); } catch {}
+    try { fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 }); fs.writeFileSync(stateFile, JSON.stringify({ cuts: found.cuts, shown: [...shown, ...found.lines.map((l) => l.key)] }), { mode: 0o600 }); } catch {}
   }
   return found ?? null;
 }

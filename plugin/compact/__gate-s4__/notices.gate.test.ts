@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { register } from '../compact.js';
 import { formatCutSummary, formatTokens, isWarningLine, makeNoticeLog, noticesMode, type NoticeHost } from '../host/notices.js';
-import { assistantText, fakeHost, humanPrompt, withStrippedRuntimeGlobals, LEGACY_OPTIONS } from './fixtures/helpers.js';
+import { assistantText, fakeHost, humanPrompt, withStrippedRuntimeGlobals, LEGACY_OPTIONS, passHarden } from './fixtures/helpers.js';
 import type { SessionMessage } from '../core/types.js';
 import { BRIEF_PUSH_ARMED, BRIEF_PUSH_FILE } from '../core/brief-push.js';
 
@@ -314,7 +314,7 @@ describe('the other hooks route through the same policy', () => {
     const run = async (surfaces: readonly string[]) => {
       const s = session({ recallPluginRoot: '/plugin' }, surfaces);
       s.files.set(`/project/.exovault/s4-capture/session-default/${BRIEF_PUSH_FILE}`, BRIEF_PUSH_ARMED);
-      const $ = { ...s.$, process: { run: async () => ({ exitCode: 0, stdout: 'null', stderr: '' }) } };
+      const $ = { ...s.$, process: { run: passHarden(async () => ({ exitCode: 0, stdout: 'null', stderr: '' })) } };
       await s.handlers['classic.PreToolUse']!($, heredoc, async () => ({}));
       await settle();
       return s;
@@ -340,7 +340,7 @@ describe('push failures say what failed (4.7.0)', () => {
   // timeout of session-push.mjs rejected `$.process.run`, and the catch dropped the message.
   const failing = async (message: string) => {
     const s = session({ recallPluginRoot: '/plugin', recallEnabled: true }, []);
-    const $ = { ...s.$, process: { run: async () => { throw new Error(message); } } };
+    const $ = { ...s.$, process: { run: passHarden(async () => { throw new Error(message); }) } };
     await s.handlers['prompt.submit']!($, { text: 'is the css test complete?', origin: { kind: 'composer' } }, async (e: unknown) => e);
     await settle();
     return s.drawn.filter((line) => line.startsWith('session_push.'));
@@ -361,7 +361,7 @@ describe('push failures say what failed (4.7.0)', () => {
     const run = async (hook: string, event: unknown, prefix: string) => {
       const s = session({ recallPluginRoot: '/plugin', recallEnabled: true }, []);
       s.files.set(`/project/.exovault/s4-capture/session-default/${BRIEF_PUSH_FILE}`, BRIEF_PUSH_ARMED);
-      const $ = { ...s.$, process: { run: async () => { throw new Error(message); } } };
+      const $ = { ...s.$, process: { run: passHarden(async () => { throw new Error(message); }) } };
       await s.handlers[hook]!($, event, async () => ({}));
       await settle();
       return s.drawn.filter((line) => line.startsWith(prefix));

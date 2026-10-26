@@ -22,7 +22,7 @@ die() { printf 'exo-compact: %s\n' "$*" >&2; exit 1; }
 # /dev/null: with curl | bash, stdin is this script.
 main() {
   local repo="${EXO_COMPACT_REPO:-https://github.com/MarcinSufa/exo-compact.git}"
-  local ref="${EXO_COMPACT_REF:-v4.9.1}"
+  local ref="${EXO_COMPACT_REF:-v4.9.2}"
   local dir="${EXO_COMPACT_HOME:-$HOME/.exo-compact}"
   local enable_dir="${EXO_COMPACT_ENABLE_DIR:-}"
   local plugin="$dir/plugin/compact"
@@ -46,10 +46,13 @@ main() {
   # The preflight check stops here on a Node.js or Claude Code that is too old.
   node "$plugin/setup.cjs" doctor --preflight </dev/null || die "the check above failed, so nothing was registered with Claude Code."
 
-  # The same call installs and re-configures: it sets only the plugin directory, so the other options
-  # stay at the manifest defaults, or as the user left them on a later run.
+  # The same call installs and re-configures: it sets only the plugin directory and the Node binary, so the
+  # other options stay at the manifest defaults, or as the user left them on a later run. The hook runs its
+  # scripts with that absolute Node, not the first node on a PATH a project can change (CONTRACT S5w).
+  local node_bin
+  node_bin="$(node -p process.execPath </dev/null)" || die "could not find the path of node."
   claude plugin marketplace add "$dir" </dev/null >/dev/null || die "claude could not add the marketplace at $dir."
-  claude plugin install exo-compact@exo-compact --config "recallPluginRoot=$plugin" </dev/null >/dev/null || die "claude could not install the plugin."
+  claude plugin install exo-compact@exo-compact --config "recallPluginRoot=$plugin" --config "nodePath=$node_bin" </dev/null >/dev/null || die "claude could not install the plugin."
   # A Claude Code that copies the plugin instead of reading it from the clone needs these two.
   claude plugin marketplace update exo-compact </dev/null >/dev/null 2>&1 || true
   claude plugin update exo-compact@exo-compact </dev/null >/dev/null 2>&1 || true

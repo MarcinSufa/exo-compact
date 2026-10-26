@@ -61,6 +61,8 @@ test('exo-compact.sh: S4_SKIP_DOCTOR and S4_WINDOW', { skip: noBashLauncher }, (
   const { cwd, env } = sandbox();
   const out = parse(spawnSync('bash', [sh, '-p', 'x'], { cwd, env: { ...env, S4_SKIP_DOCTOR: '1', S4_WINDOW: '5000' }, encoding: 'utf8' }));
   assert.equal(out.window, '5000');
+  // 4.9.2 (CONTRACT S5w): the Node on the user's own PATH, so the hook does not take one from a project's env block.
+  assert.equal(out.settings.pluginConfigs['exo-compact'].options.nodePath, fs.realpathSync(process.execPath));
 });
 
 test('exo-compact.ps1: no param block, so -p is claude\'s and positional words are not -PluginDir', { skip: pwsh ? false : 'pwsh not found (set PWSH)' }, () => {
@@ -83,6 +85,7 @@ test('exo-compact.ps1: -PluginDir, -Window, -Jev, -SkipDoctor are recognised onl
   assert.deepEqual(out.args.slice(4), ['-pluginDirX', '-Win', 'word', '-p', 'hi']);
   assert.equal(out.window, '5000');
   assert.equal(out.settings.pluginConfigs['exo-compact'].options.jevEnabled, true);
+  assert.equal(out.settings.pluginConfigs['exo-compact'].options.nodePath, fs.realpathSync(process.execPath));
 });
 
 test('exo-compact.ps1: a recognised flag with no value is an error, not a silent drop', { skip: pwsh ? false : 'pwsh not found (set PWSH)' }, () => {

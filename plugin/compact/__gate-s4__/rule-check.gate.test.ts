@@ -1,5 +1,6 @@
 import { LEGACY_OPTIONS } from './fixtures/helpers.js';
 import { execFileSync } from 'node:child_process';
+import { SCRUBBED_ENV } from '../host/node-run.js';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -158,6 +159,8 @@ function host(options: { files?: Record<string, string>; ran?: { exitCode: numbe
     env: { get: async () => undefined },
     process: {
       run: async (argv: readonly string[], init: { stdin?: string }) => {
+        // 4.9.2 review: the capture guard's harden.mjs run is not a rule check.
+        if (String(argv[1]).endsWith('/harden.mjs')) return { exitCode: 0, stdout: '', stderr: '' };
         runs.push({ argv, init });
         if (options.ran === 'throw') throw new Error('timeout');
         return { stderr: '', ...(options.ran ?? { exitCode: 0, stdout: JSON.stringify({ broken: [], units: 4, ms: 380 }) }) };
@@ -179,7 +182,7 @@ describe('3.48.0 (S4zv) stop hook', () => {
     expect(h.runs).toHaveLength(1);
     expect(h.runs[0]!.argv).toEqual(['node', '/plugin/recall/rule-check.mjs', '/tmp/project']);
     expect(JSON.parse(h.runs[0]!.init.stdin!)).toEqual({ card: CARD, report: stop.last_assistant_message });
-    expect(h.runs[0]!.init.env).toEqual({ EXO_JEV_MODEL: 'jev-latest' });
+    expect(h.runs[0]!.init.env).toEqual({ ...SCRUBBED_ENV, EXO_JEV_MODEL: 'jev-latest' });
     expect(h.logs).toContain('rule_check.fired=0 broken=0 units=4 ms=380');
   });
 

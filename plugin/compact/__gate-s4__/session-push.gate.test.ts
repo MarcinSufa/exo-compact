@@ -1,4 +1,4 @@
-import { LEGACY_OPTIONS } from './fixtures/helpers.js';
+import { LEGACY_OPTIONS, passHarden } from './fixtures/helpers.js';
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -6,9 +6,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_PUSH_FILE, parseSessionPush, renderSessionPush } from '../core/session-push.js';
+import { SESSION_PUSH_FILE, parsePushPointer, parseSessionPush, renderSessionPush } from '../core/session-push.js';
 import { SESSION_PUSH_MAX_CHARS, sessionPush } from '../recall/session-push.mjs';
-import { PUSH_POINTER, PUSH_STATE_FILE, startPushServer } from '../recall/push-server.mjs';
+import { PUSH_POINTER, PUSH_STATE_FILE, socketPath, startPushServer } from '../recall/push-server.mjs';
 import { generationKey, readPublished } from '../recall/recall.mjs';
 import { prepare, terms } from '../recall/rank.mjs';
 import { hash } from '../recall/shared.mjs';
@@ -138,7 +138,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
       env: { get: async (name: string) => (name === 'HOME' ? '/home/u' : undefined) },
       clock: { now: async () => 0, after: (_ms: number, fn: () => void) => { if (server?.fireTimers) queueMicrotask(fn); return { cancel: () => {} }; } },
       http: { fetch: async (url: string, init: Parameters<Fetch>[1]) => { fetches.push({ url, init }); if (!server) throw new Error('ENOENT'); return server.fetch(url, init); } },
-      process: { run: async (argv: string[], init?: { stdin?: string }) => { runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; } },
+      process: { run: passHarden(async (argv: string[], init?: { stdin?: string }) => { runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; }) },
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};
@@ -186,7 +186,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
         fetches.push(request);
         return request;
       } },
-      process: { run: async () => { throw new Error('unexpected CLI fallback'); } },
+      process: { run: passHarden(async () => { throw new Error('unexpected CLI fallback'); }) },
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};
@@ -290,6 +290,21 @@ function post(socketPath: string, body: unknown, headers: Record<string, string>
     req.end(JSON.stringify(body));
   });
 }
+
+describe('4.9.2: a Windows pipe name cannot be guessed', () => {
+  it('carries 128 random bits after the session prefix and pid, and the hook still accepts it', () => {
+    const names = [1, 2].map(() => socketPath({ platform: 'win32', prefix: '0123456789abcdef', instance: 4242 }));
+    for (const name of names) {
+      expect(name).toMatch(/^\\\\\.\\pipe\\exo-recall-0123456789abcdef-4242-[0-9a-f]{32}$/);
+      expect(parsePushPointer(JSON.stringify({ socket: name, token: 't' }))?.socket).toBe(name);
+    }
+    expect(names[0]).not.toBe(names[1]);
+  });
+
+  it('keeps the short Unix socket name in its owner-only directory', () => {
+    expect(socketPath({ platform: 'linux', socketDir: '/tmp/exo-recall-1', prefix: 'abc', instance: 7 })).toBe(path.join('/tmp/exo-recall-1', 'abc-7.sock'));
+  });
+});
 
 const socketDir = () => { const dir = mkdtempSync(path.join(os.tmpdir(), 'sp-')); chmodSync(dir, 0o700); return dir; };
 

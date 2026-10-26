@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from '../compact.js';
 import { reconcile } from '../core/extractor.js';
-import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS, cpuMsAsync } from './fixtures/helpers.js';
+import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS, cpuMsAsync, passHarden } from './fixtures/helpers.js';
+import { SCRUBBED_ENV } from '../host/node-run.js';
 import type { CompactEvent, SessionMessage } from '../core/types.js';
 import type { FakeHost } from './fixtures/helpers.js';
 import { makeFsCaptureStore } from '../host/fs-adapter.js';
@@ -284,7 +285,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
     const segment = '/project/.exovault/s4-capture/session-default/segment-000001.json';
     files.set(segment, `${JSON.stringify({ kind: 'work_event', origin: 'turn', producedBy: 's4-capture', sourceHash: 'bad', body: { type: 'clone' } })}\n`);
     const log = vi.fn();
-    const $ = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: () => { throw new Error('sync probe failure'); }, uiLog: log });
+    const $ = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: (argv) => { if (String(argv[1]).endsWith('/harden.mjs')) return Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }); throw new Error('sync probe failure'); }, uiLog: log });
     const next = vi.fn(async () => ({ fallback: true }) as unknown);
     const result = (await withStrippedRuntimeGlobals(() => harness({ denseNotes: false })['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() }, next))) as { messages?: SessionMessage[] };
     expect(next).not.toHaveBeenCalled();
@@ -303,7 +304,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
       fsWrite: async (path, text) => { files.set(path, text); },
       fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })),
       fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path),
-      processRun,
+      processRun: passHarden(processRun),
       uiLog: log,
     });
     const handlers = harness({ denseNotes: false });
@@ -364,7 +365,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
       fsWrite: async (path, text) => { files.set(path, text); },
       fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })),
       fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path),
-      processRun,
+      processRun: passHarden(processRun),
       uiLog: log,
     });
     const handlers = harness({ denseNotes: false });
@@ -377,7 +378,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
     expect(log).toHaveBeenCalledWith('seed.work_state_probe=timeout');
 
     const disabledRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    const disabledHost = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: disabledRun });
+    const disabledHost = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: passHarden(disabledRun) });
     const disabled = harness({ workState: false });
     const disabledResult = (await withStrippedRuntimeGlobals(() => disabled['session.compact'](disabledHost, { trigger: 'auto', messages }, next))) as { messages?: SessionMessage[] };
     expect(disabledRun).not.toHaveBeenCalled();
@@ -1084,6 +1085,7 @@ it('plugin manifest declares each compact option with the matching option type',
     interactiveOnly: 'boolean',
     notices: 'string',
     recallPluginRoot: 'string',
+    nodePath: 'string',
     timeoutMs: 'number',
     retentionDays: 'number',
     contract: 'string',
@@ -1158,18 +1160,21 @@ it('registers the S4a compaction hook and the soft trigger in their own separate
   expect(triggerHooks.modules).toEqual(['../trigger.ts']);
 });
 
+/** 4.9.2: the recall launcher's runs, without the harden.mjs runs (host/capture-mode.ts) the same hooks start. */
+const launches = (run: { mock: { calls: unknown[][] } }) => run.mock.calls.filter((call) => String((call[0] as string[])[1]).endsWith('/recall/launch.mjs')) as [string[], unknown][];
+
 describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
   it('recallEnabled starts only the detached launcher and points the seed at the MCP recall tool', async () => {
     const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const $ = fakeHost({ fsExists, processRun, envGet: async (name) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined });
+    const $ = fakeHost({ fsExists, processRun, pluginRoot: '/plugins/exo-compact', envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
     const handlers = harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false });
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
     const event: CompactEvent = { trigger: 'auto', messages: bulkyToolConversation() };
     const result = (await withStrippedRuntimeGlobals(() => handlers['session.compact']($, event, next))) as { messages?: SessionMessage[] };
-    expect(processRun).toHaveBeenCalledTimes(1);
-    expect(processRun.mock.calls[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'vectors', 'cut', '30']);
-    expect(processRun.mock.calls[0][1]).toEqual({ timeoutMs: 5000 });
+    expect(launches(processRun)).toHaveLength(1);
+    expect(launches(processRun)[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'vectors', 'cut', '30']);
+    expect(launches(processRun)[0][1]).toEqual({ timeoutMs: 5000, env: SCRUBBED_ENV });
     expect(result.messages?.[0].text).toContain('search_session tool (server recall) using session "session-default"');
     expect(result.messages?.[0].text).not.toContain('recall.mjs');
   });
@@ -1177,26 +1182,28 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
   it('turn.complete refreshes the recall index after an answer (turn trigger), and not when recall is off', async () => {
     const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined;
-    const $ = fakeHost({ fsExists, processRun, envGet });
+    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : undefined;
+    const pluginRoot = '/plugins/exo-compact';
+    const $ = fakeHost({ fsExists, processRun, envGet, pluginRoot });
     await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, recallVectors: false })['turn.complete']($, { reason: 'answer' }, async () => ({})));
-    expect(processRun).toHaveBeenCalledTimes(1);
-    expect(processRun.mock.calls[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'lexical', 'turn', '30']);
+    expect(launches(processRun)).toHaveLength(1);
+    expect(launches(processRun)[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'lexical', 'turn', '30']);
     const processRunOff = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    await withStrippedRuntimeGlobals(() => harness({})['turn.complete'](fakeHost({ fsExists, processRun: processRunOff, envGet }), { reason: 'answer' }, async () => ({})));
-    expect(processRunOff).not.toHaveBeenCalled();
+    await withStrippedRuntimeGlobals(() => harness({})['turn.complete'](fakeHost({ fsExists, processRun: processRunOff, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
+    expect(launches(processRunOff)).toHaveLength(0);
   });
 
   it('retentionDays reaches the launcher at a cut and after an answer; 0 turns retention off', async () => {
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined;
+    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : undefined;
+    const pluginRoot = '/plugins/exo-compact';
     const cutRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
-    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, retentionDays: 0 })['session.compact'](fakeHost({ fsExists, processRun: cutRun, envGet }), { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(cutRun.mock.calls[0][0].slice(-2)).toEqual(['cut', '0']);
+    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, retentionDays: 0 })['session.compact'](fakeHost({ fsExists, processRun: cutRun, envGet, pluginRoot }), { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
+    expect(launches(cutRun)[0][0].slice(-2)).toEqual(['cut', '0']);
     const turnRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, retentionDays: 7 })['turn.complete'](fakeHost({ fsExists, processRun: turnRun, envGet }), { reason: 'answer' }, async () => ({})));
-    expect(turnRun.mock.calls[0][0].slice(-2)).toEqual(['turn', '7']);
+    await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, retentionDays: 7 })['turn.complete'](fakeHost({ fsExists, processRun: turnRun, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
+    expect(launches(turnRun)[0][0].slice(-2)).toEqual(['turn', '7']);
   });
 
   it('turn capture writes .exovault/.gitignore next to the captures, once per root', async () => {
@@ -1213,20 +1220,32 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     expect(files.get(ignores[0])).toBe(CAPTURE_GITIGNORE);
   });
 
-  it('recallPluginRoot userConfig wins over CLAUDE_PLUGIN_ROOT, and a missing root is logged', async () => {
-    const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+  it('4.9.2: $.plugin.root wins, CLAUDE_PLUGIN_ROOT from a project env block is ignored, recallPluginRoot is only a safe absolute fallback', async () => {
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const $ = fakeHost({ fsExists, processRun, envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
-    const handlers = harness({ contract: 'the contract', recallEnabled: true, recallPluginRoot: '/explicit/plugin', workStateProbe: false });
+    // A cloned repository's .claude/settings.json `env` block reaches $.env.get for the whole session.
+    const hostileEnv = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/tmp/evil-env' : undefined;
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
-    await withStrippedRuntimeGlobals(() => handlers['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(processRun.mock.calls[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
-    const log = vi.fn();
-    const processRun2 = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    const $2 = fakeHost({ fsExists, processRun: processRun2, uiLog: log, envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
-    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false })['session.compact']($2, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(processRun2).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith('recall.build_started=0 reason=no_plugin_root');
+    const cut = (options: Record<string, unknown>, $: ReturnType<typeof fakeHost>) =>
+      withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, ...options })['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
+
+    const engineRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: engineRun, envGet: hostileEnv, pluginRoot: '/plugins/exo-compact/' }));
+    expect(launches(engineRun)[0][0][1]).toBe('/plugins/exo-compact/recall/launch.mjs');
+
+    const optionRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: optionRun, envGet: hostileEnv, pluginRoot: '' }));
+    expect(launches(optionRun)[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
+
+    for (const unsafe of ['relative/plugin', '/opt/../tmp/evil', '']) {
+      const log = vi.fn();
+      const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+      next.mockClear();
+      await cut({ recallPluginRoot: unsafe }, fakeHost({ fsExists, processRun: run, uiLog: log, envGet: hostileEnv, pluginRoot: '' }));
+      expect(run, unsafe).not.toHaveBeenCalled();
+      // 4.9.2 review (S5u): with no trusted plugin root harden.mjs cannot run, so no capture store is verified and the cut
+      // is native: nothing is written and no script starts.
+      expect(next, unsafe).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('is rendered in the seed when the derived transcript file exists', async () => {

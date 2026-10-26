@@ -3386,3 +3386,108 @@ Recovery rechecks the canonical path immediately before rename and verifies the 
 Node's rename may replace an empty target directory, so a writer's first write after an hour of silence can still race if it
 starts within the same milliseconds.
 The worker checks tombstones on every invocation, even when its daily stamp defers ordinary index and capture pruning.
+
+### S5t: the plugin root comes from Claude Code (4.9.2)
+
+The hook runs the plugin's own scripts (`recall/launch.mjs`, `brief.mjs`, `brief-push.mjs`, `session-push.mjs`,
+`rule-check.mjs`, `doctor.mjs`, `harden.mjs`) from `trustedPluginRoot` (`host/plugin-root.ts`): `$.plugin.root`, the
+directory Claude Code loaded the hooks module from, when it is an absolute path without `..` or a control character.
+Only when the host gives none is the `recallPluginRoot` option used, under the same path check; with neither, nothing is
+run and the hook logs `reason=no_plugin_root`. `CLAUDE_PLUGIN_ROOT` is never read: a project's `.claude/settings.json`
+or `settings.local.json` sets it for the whole session through its `env` block (measured on Claude Code 2.1.292), so a
+cloned repository could point the hook at a script of its own. `recall/brief.mjs` no longer takes a binary from the
+environment either. The dollar-spelling rule allows exactly `$.plugin.root` and `$.plugin.name` read as a value.
+Gate tests: compact, "4.9.2: $.plugin.root wins"; dollar-spelling; capture-security, "runs harden.mjs from the trusted
+plugin root".
+
+### S5u: an owner-only capture store, redacted at first write (4.9.2)
+
+`$.fs.write` takes no mode, so the hook runs `harden.mjs` through `$.process.run` (`host/capture-mode.ts`, 5 s timeout,
+never failing a hook, but a store it did not verify gets no capture): before the first capture write under a root (awaited, see the review fixes
+below), `<root>/.exovault` and `<root>/.exovault/s4-capture` become 0700; after each
+turn's capture and each cut's writes, the session directory becomes 0700 and every file in it 0600. Symbolic links are
+not followed. Files the plugin writes with Node (`setup.cjs`, brief and session push, cleanup, vectors) pass explicit
+0700/0600 modes. Once a held brief is back in the prompt box, `held-brief.md` (the one verbatim, unredacted copy of a
+prompt) is deleted; a brief that is not returned keeps its 0600 copy. On Windows `chmod` only toggles the read-only
+flag; the store keeps the ACL it inherits.
+
+Captured records, the task card the fork writes and the working-directory snapshot are redacted (`redactCapturedText`,
+`redactHostPath`) before they are written, not only when the seed reads them back. Gate: `capture-security.gate.test.ts`.
+
+Review fixes (4.9.2, fail closed). `harden.mjs` exits 0 only when every directory it was given (`.exovault`,
+`s4-capture` and, when passed, the session directory, which must be one segment directly under `s4-capture`) is a real
+directory (lstat, never a link) owned by the running user and, off Windows, at 0700 afterwards; otherwise it exits 2
+and touches nothing under a link. `hardenCaptureRoot` and `hardenCaptureSession` (`host/capture-mode.ts`) return true
+only for exit code 0; no plugin root, a timeout or a failed start are false too. `makeCaptureGuard().secure(host, root,
+sessionDir)` runs `hardenCaptureSession` once per root and session directory per process and keeps only a success, so a
+failure is retried at the next lookup. Every `findCaptureRoot` call that leads to a capture write passes `secure`
+(`FlagHost.secure`, `host/capture-flag.ts`), which awaits that check for the root it picked and returns null for a root
+that did not pass: the held brief, turn captures, cut writes, the task card, brief check and brief push, session push
+and recall launches write nothing under it. Because the lookup runs at every write, a root first chosen after a change
+of working directory during a session is verified before its first write too. The calls after a turn, after a cut and
+when the held brief is dropped (`--remove held-brief.md`) only tighten the modes of what was just written, under a root
+that already passed. `jevEgressAllowed` reads the flag only and does not harden. Residual: a verified root is not
+checked again within the process, so a local process that swaps it for a link later is not seen until the next one.
+Gates: capture-security, "4.9.2 review (S5u)".
+
+### S5v: section bodies cannot forge seed structure (4.9.2)
+
+`renderSeed` passes every body (every string of `SeedSections` and each verbatim user line) through `guardSectionBody`
+(`core/seed-guard.ts`) before it adds the seed's own headings, so the seed's headings are never touched:
+
+- CR, CRLF, VT, FF, NEL, U+2028 and U+2029 become `\n` first;
+- a line whose `#` or `##` heading names a seed section (Constraints, Task card, Since the card, Task brief, Compaction
+  pressure, Key facts, Working notes, Transcript, Contract, Todo, Earlier user messages, Values, Current values, Earlier
+  assistant notes, Gates and errors, File pointers, Next step, Work state, Recipes, Session map, IDs; exact, or followed
+  by ` (` or `:`) becomes `###`. This holds after a quote marker, table pipe or list marker, inside code fences, after
+  NFKC folding, with format characters and combining marks removed, and with emphasis marks and closing `#` or `|`
+  ignored. A setext underline (`==`, `--`) under such a name is dropped;
+- `<session-memory`, `</session-memory` and `<system-reminder` (also with `＜`, `﹤`, `&lt;`, `&#60;` or `&#x3c;`, and
+  with spaces after the bracket) get `‹` in place of the bracket, so a body can neither close the seed's wrapper nor
+  open a reminder. The tag is looked for in the folded line (NFKC, format characters and combining marks removed), so
+  `</session-\u200Bmemory>` is caught too; a line that holds such a tag is kept in its folded form, every other line
+  as written.
+
+`isSeedSectionName` drops inline HTML tags (`<b>Constraints</b>`) and unwraps Markdown links and images
+(`[Constraints](#)`, `[Constraints][ref]`, `![Constraints](x)`, nested ones one level per pass) before it compares, so
+`## [Constraints](#)` and `## <b>Constraints</b>` are demoted like `## Constraints`; the line keeps its link or tags.
+
+`###` headings and every other heading or text are left as written. `extractAdoptedFileConstraints` adopts a file only
+when `userAuthoredText` (the message without Claude Code's reminders and hook output) asks to follow it; constraints
+otherwise come only from `kind: 'user'` records, which never hold tool results. Gate: `seed-guard.gate.test.ts`.
+
+### S5w: Node children cannot be redirected by a project's environment (4.9.2)
+
+A project's `.claude/settings.json` `env` block reaches every process the session starts, `NODE_OPTIONS` and `PATH`
+included (measured on Claude Code 2.1.292: a `--require` of a repository file and a repository `node` first on `PATH`
+both ran). The hook has no `process` of its own, so it cannot use `process.execPath`. Every Node script the hook
+starts (`harden.mjs`, `doctor.mjs`, `recall/*.mjs`) goes through `nodeRunner` (`host/node-run.ts`):
+
+- argv[0] `node` becomes the `nodePath` option when that is an absolute path without `..` or a control character and
+  exists (`trustedNode`); otherwise it stays `node`. `nodePath` is a user option (`pluginConfigs`, which a project's
+  settings do not override); `install.sh` and `install.ps1` set it to the Node that ran them
+  (`--config "nodePath=..."`);
+- `SCRUBBED_ENV` is laid over the child's `env`: `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`,
+  `NODE_V8_COVERAGE`, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `LD_PRELOAD`, `LD_AUDIT`,
+  `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES` and `DYLD_LIBRARY_PATH` are set empty, which Node and the loader read as
+  unset. A CA bundle a user set through `NODE_EXTRA_CA_CERTS` is therefore not used by the rule check's request either.
+
+`recall/brief.mjs` starts the digest's `claude` only from `claudeBin()`: `~/.local/bin/claude` (`claude.exe` on Windows),
+else the `claude` next to its own `process.execPath`, never from `PATH` or `CLAUDE_CODE_EXECPATH`; with neither, it
+writes the `.digest.err` file and the seed shows the brief without a checklist. Its `claude` child and its detached
+worker get `digestEnv()` / `SCRUBBED_ENV` too. Gates: capture-security, "4.9.2 review (S5w)".
+
+### 4.9.2: pinned vectors runtime and Windows pipe name
+
+`ensureRuntime` writes `package.json` and `package-lock.json` from `recall/runtime-lock.json` (lockfile v3, root
+dependency `@huggingface/transformers` 4.3.0 exact, an npm registry integrity hash for every package) and runs
+`npm ci --ignore-scripts --no-audit --no-fund --omit=dev`. The skipped scripts are protobufjs's version warning and
+onnxruntime-node's download of the CUDA and TensorRT providers, which `prune` deletes anyway; the CPU binary ships in the
+package. The model loads with `revision` `MODEL_REVISION` (a hub commit). `READY` records `model`, `revision`,
+`runtime`, `platform` (`process.platform`) and `arch` (`process.arch`); `runtimeReady` is true only when all five
+match, so an install from before 4.9.2 installs again once, and so does a runtime directory moved to another platform
+or CPU architecture, whose onnxruntime binaries `prune` removed for every platform but the one it was installed on.
+
+`socketPath` names a Windows pipe `\\.\pipe\exo-recall-<session prefix>-<instance>-<32 hex random>`; Unix sockets keep
+`<socketDir>/<prefix>-<instance>.sock` in the owner-only socket directory. Gates: recall-vectors, "4.9.2: the vectors
+runtime is pinned"; session-push, "4.9.2: a Windows pipe name cannot be guessed".

@@ -13,6 +13,9 @@ import { pathToFileURL } from 'node:url';
 
 export const MODEL = 'Xenova/multilingual-e5-small';
 export const TRANSFORMERS = '@huggingface/transformers@4.3.0';
+// 4.9.2: the model comes from this hub commit, not from `main`, and the runtime tree from `runtime-lock.json`.
+export const MODEL_REVISION = '761b726dd34fb83930e26aab4e9ac3899aa1fa78';
+const RUNTIME_LOCK = new URL('./runtime-lock.json', import.meta.url);
 export const DIM = 384;
 const KEY = 8, RECORD = KEY + DIM;
 const FILE = 'vectors-e5-small-q8.bin';
@@ -100,12 +103,28 @@ export function takeEmbedSlot(recallRoot, slots = EMBED_SLOTS, pid = process.pid
   return null;
 }
 
-export function runtimeReady(dir) { return fs.existsSync(path.join(dir, 'READY')); }
+/**
+ * What READY records; an install made before 4.9.2 (no revision) or for another runtime is not ready and installs again.
+ * `prune` keeps only this platform's onnxruntime binary, so a runtime directory copied to another platform or CPU
+ * architecture (a synced home, a moved disk) is not ready either and installs again.
+ */
+export const readyStamp = () => ({ model: MODEL, revision: MODEL_REVISION, runtime: TRANSFORMERS, platform: process.platform, arch: process.arch });
+
+export function runtimeReady(dir) {
+  try {
+    const ready = JSON.parse(fs.readFileSync(path.join(dir, 'READY'), 'utf8'));
+    return Object.entries(readyStamp()).every(([key, value]) => ready?.[key] === value);
+  } catch { return false; }
+}
 
 /**
  * Installs transformers.js and the model into `dir` once (npm, then one model download). Prunes onnxruntime binaries
  * for other platforms and the GPU providers (744 MB -> about 160 MB). A failure is remembered for a day so every
  * compaction does not retry a broken install.
+ * 4.9.2: `npm ci` from the shipped lock, so every package is the exact version with the integrity hash recorded there
+ * (no range resolves to a newer release), and `--ignore-scripts`, so no package runs code at install. The scripts it
+ * skips are protobufjs's version warning and onnxruntime-node's download of the CUDA and TensorRT providers, which
+ * `prune` deleted anyway; the CPU binary is in the package itself.
  */
 export async function ensureRuntime(dir, log = () => {}) {
   if (runtimeReady(dir)) return true;
@@ -119,13 +138,15 @@ export async function ensureRuntime(dir, log = () => {}) {
     try { if (Date.now() - fs.statSync(lock).mtimeMs < 20 * 60 * 1000) return false; fs.unlinkSync(lock); return ensureRuntime(dir, log); } catch { return false; }
   }
   try {
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
-    const npm = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--omit=dev', TRANSFORMERS], { cwd: dir, stdio: 'ignore', timeout: 15 * 60 * 1000, shell: process.platform === 'win32' });
-    if (npm.status !== 0) throw new Error(`npm install exited ${npm.status ?? npm.signal ?? npm.error?.code}`);
+    const pinned = JSON.parse(fs.readFileSync(RUNTIME_LOCK, 'utf8'));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: pinned.packages[''].dependencies }), { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify(pinned), { mode: 0o600 });
+    const npm = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--omit=dev'], { cwd: dir, stdio: 'ignore', timeout: 15 * 60 * 1000, shell: process.platform === 'win32' });
+    if (npm.status !== 0) throw new Error(`npm ci exited ${npm.status ?? npm.signal ?? npm.error?.code}`);
     prune(dir);
     const embed = await loadEmbedder(dir, { download: true });
     await embed([`${QUERY}ok`]);
-    fs.writeFileSync(path.join(dir, 'READY'), JSON.stringify({ model: MODEL, runtime: TRANSFORMERS, at: new Date().toISOString() }));
+    fs.writeFileSync(path.join(dir, 'READY'), JSON.stringify({ ...readyStamp(), at: new Date().toISOString() }), { mode: 0o600 });
     try { fs.unlinkSync(failed); } catch {}
     log('runtime installed');
     return true;
@@ -157,7 +178,7 @@ export async function loadEmbedder(dir, { download = false, threads } = {}) {
   const t = mod.pipeline ? mod : mod.default;
   t.env.cacheDir = path.join(dir, 'models');
   t.env.allowRemoteModels = download;
-  const ext = await t.pipeline('feature-extraction', MODEL, { dtype: 'q8', ...(threads ? { session_options: { intraOpNumThreads: threads } } : {}) });
+  const ext = await t.pipeline('feature-extraction', MODEL, { dtype: 'q8', revision: MODEL_REVISION, ...(threads ? { session_options: { intraOpNumThreads: threads } } : {}) });
   return async (texts) => {
     const out = await ext(texts, { pooling: 'mean', normalize: true });
     const dim = out.dims[1];

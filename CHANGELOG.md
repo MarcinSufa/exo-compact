@@ -2,8 +2,45 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
-## Unreleased
+## 4.9.2 - 2026-10-26
 
+Security release from a pre-launch audit. See `SECURITY.md` for the policy and how to report a vulnerability.
+
+- The hook runs its own scripts only from the directory Claude Code loaded it from (`$.plugin.root`, S5t). It no longer
+  reads `CLAUDE_PLUGIN_ROOT`, which a cloned project's `.claude/settings.json` could set through its `env` block to point
+  the hook at a script of its own. `recallPluginRoot` is only a fallback and must be an absolute path without `..`.
+- The capture store is owner-only (S5u): `.exovault`, `s4-capture` and each session directory are 0700 and every
+  capture file 0600, set before a session's first capture write and after every turn and every cut (`harden.mjs`).
+  Before, they followed the umask (often 664/775). The held brief is deleted once it is back in the prompt box.
+- Secrets are redacted where capture records, the task card and the working-directory snapshot are written, not only
+  when the seed reads them back.
+- Seed bodies cannot forge seed structure (S5v): a `#`/`##` heading that names a seed section (`## Constraints`,
+  `## Task card`, ...) is demoted, also inside code fences, quotes, tables and list items and after Unicode folding;
+  `session-memory` and `system-reminder` tags are neutralized. Adopted-file constraints come only from text the user
+  typed, not from a system reminder or hook output appended to a user message.
+- The optional vectors runtime installs with `npm ci --ignore-scripts` from a shipped lock
+  (`recall/runtime-lock.json`, exact versions with integrity hashes), and the model loads from a pinned hub commit. An
+  install from an earlier version installs again once.
+- The Windows named pipe of the recall push server carries 128 random bits in its name.
+- New `SECURITY.md`: private vulnerability reporting, data the plugin keeps, hardening and known limits (Windows ACLs).
+- Fixes from a cross-vendor security review of this release:
+  - Node scripts the hook starts can no longer be redirected by a project's `env` block (S5w). `NODE_OPTIONS`,
+    `NODE_PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES` and similar variables are cleared for every child, and the Node
+    binary comes from the new `nodePath` option, which `install.sh` and `install.ps1` set to the Node that ran them
+    (without it, `node` from `PATH`). The brief digest starts `claude` only from `~/.local/bin` or next to its own
+    Node, never from `PATH`.
+  - The capture store fails closed (S5u). `harden.mjs` exits 2 when `.exovault`, `s4-capture` or the session directory
+    is a symbolic link, not a directory owned by the user, or not 0700 afterwards, and the hook then writes nothing
+    there: a repository that commits `.exovault/s4-capture` as a link into its checkout no longer gets the held brief
+    or capture segments written through it. The check is awaited before the first write under every newly chosen root,
+    also after the working directory changes during a session, and only a success is cached.
+  - Seed integrity (S5v): `## [Constraints](#)`, `## <b>Constraints</b>` and similar link or inline-HTML wrappings of a
+    seed section name are demoted too, and a wrapper tag hidden with zero-width or combining characters
+    (`</session-\u200Bmemory>`) is neutralized.
+  - The vectors runtime's `READY` stamp records the platform and CPU architecture, so a runtime directory moved to
+    another one installs again instead of loading binaries `prune` removed.
+  - `SECURITY.md` states that everything stays local in the default configuration and names the two opt-in features
+    that send data to Jev, `jevEnabled` and `ruleCheck`.
 - First installs no longer print Git's detached-HEAD advice (#75).
 - README: a new lead (0.4 s instead of 62 s, no model call), a three-step "How it works" (capture, deterministic
   rebuild, recall with `search_session`) and a new how-it-works graphic. `docs/assets/social-preview.png` is the

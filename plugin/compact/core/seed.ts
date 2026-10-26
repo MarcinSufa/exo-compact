@@ -1,4 +1,5 @@
 import { omittedHistoryMarker, SEED_SENTINEL } from './sentinel.js';
+import { guardSectionBody } from './seed-guard.js';
 import type { SessionMessage, TokenCounter } from './types.js';
 
 export { SEED_SENTINEL, omittedHistoryMarker };
@@ -102,12 +103,20 @@ export const SEED_MEMORY_CLOSE = '</session-memory>';
 
 const BODY_INDEX = { constraints: 0, keyFacts: 1, transcript: 2, contract: 3, todo: 4, userInstructions: 5, values: 6, reasoning: 7, gates: 8, files: 9, nextStep: 10 } as const;
 
+/** 4.9.2 (CONTRACT S5v): every body goes through `guardSectionBody` before the seed's own headings are added. */
+function guardSections(sections: SeedSections): SeedSections {
+  const guarded = { ...sections, userInstructionsVerbatim: sections.userInstructionsVerbatim.map(guardSectionBody) } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(guarded)) if (typeof value === 'string') guarded[key] = guardSectionBody(value);
+  return guarded as unknown as SeedSections;
+}
+
 export function renderSeed(
-  sections: SeedSections,
+  rawSections: SeedSections,
   omittedCount: number,
   budgetTokens: number,
   countTokens: TokenCounter,
 ): SeedRenderResult {
+  const sections = guardSections(rawSections);
   const bodies = [
     sections.constraints,
     sections.denseNotes ?? sections.keyFacts ?? '',

@@ -195,6 +195,8 @@ export async function withStrippedRuntimeGlobals<T>(run: () => Promise<T> | T): 
 
 /** The slice of `$` a `session.compact`/`turn.complete` handler gets (cc.d.ts:2600-2631, 2320-2367). */
 export interface FakeHost {
+  /** 4.9.2: Claude Code's own report of the plugin directory; `/fake-plugin` unless a test sets `pluginRoot` (the capture guard runs harden.mjs from it, and the default `process.run` exits 0). */
+  plugin: { name: string; root: string };
   fs: {
     read: (path: string) => Promise<string>;
     write: (path: string, text: string) => Promise<void>;
@@ -263,8 +265,10 @@ export function fakeHost(overrides: {
   envSet?: FakeHost['env']['set'];
   httpFetch?: FakeHost['http']['fetch'];
   processRun?: FakeHost['process']['run'];
+  pluginRoot?: string;
 } = {}): FakeHost {
   return {
+    plugin: { name: 'exo-compact', root: overrides.pluginRoot ?? '/fake-plugin' },
     fs: {
       read: overrides.fsRead ?? (async () => ''),
       write: overrides.fsWrite ?? (async () => {}),
@@ -334,3 +338,12 @@ export function fakeHost(overrides: {
  * a host with no terminal surface, so they pin those four options explicitly instead of inheriting the fallback.
  */
 export const LEGACY_OPTIONS = { interactiveOnly: false, recallEnabled: false, briefPush: true, briefCheck: true } as const;
+
+/**
+ * 4.9.2 review (CONTRACT S5u): the capture guard runs harden.mjs before any capture write and keeps a root only when that
+ * run exits 0. A test that fakes `$.process.run` for another script wraps it in this, so harden.mjs passes and is not
+ * recorded or thrown at.
+ */
+export function passHarden<A extends readonly string[], I, R>(run: (argv: A, init: I) => Promise<R>): (argv: A, init: I) => Promise<R> {
+  return async (argv, init) => (String(argv[1]).endsWith('/harden.mjs') ? ({ exitCode: 0, stdout: '', stderr: '' } as R) : run(argv, init));
+}
