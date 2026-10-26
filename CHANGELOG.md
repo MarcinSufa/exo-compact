@@ -2,6 +2,28 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## 4.9.2 - 2026-10-26
+
+Security release from a pre-launch audit. See `SECURITY.md` for the policy and how to report a vulnerability.
+
+- The hook runs its own scripts only from the directory Claude Code loaded it from (`$.plugin.root`, S5t). It no longer
+  reads `CLAUDE_PLUGIN_ROOT`, which a cloned project's `.claude/settings.json` could set through its `env` block to point
+  the hook at a script of its own. `recallPluginRoot` is only a fallback and must be an absolute path without `..`.
+- The capture store is owner-only (S5u): `.exovault`, `s4-capture` and each session directory are 0700 and every
+  capture file 0600, set before a session's first capture write and after every turn and every cut (`harden.mjs`).
+  Before, they followed the umask (often 664/775). The held brief is deleted once it is back in the prompt box.
+- Secrets are redacted where capture records, the task card and the working-directory snapshot are written, not only
+  when the seed reads them back.
+- Seed bodies cannot forge seed structure (S5v): a `#`/`##` heading that names a seed section (`## Constraints`,
+  `## Task card`, ...) is demoted, also inside code fences, quotes, tables and list items and after Unicode folding;
+  `session-memory` and `system-reminder` tags are neutralized. Adopted-file constraints come only from text the user
+  typed, not from a system reminder or hook output appended to a user message.
+- The optional vectors runtime installs with `npm ci --ignore-scripts` from a shipped lock
+  (`recall/runtime-lock.json`, exact versions with integrity hashes), and the model loads from a pinned hub commit. An
+  install from an earlier version installs again once.
+- The Windows named pipe of the recall push server carries 128 random bits in its name.
+- New `SECURITY.md`: private vulnerability reporting, data the plugin keeps, hardening and known limits (Windows ACLs).
+
 ## 4.9.1 - 2026-10-25
 
 - The compact and dense timing gates measure CPU time instead of wall time, so server load no longer fails them (#68).

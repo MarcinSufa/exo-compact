@@ -3386,3 +3386,63 @@ Recovery rechecks the canonical path immediately before rename and verifies the 
 Node's rename may replace an empty target directory, so a writer's first write after an hour of silence can still race if it
 starts within the same milliseconds.
 The worker checks tombstones on every invocation, even when its daily stamp defers ordinary index and capture pruning.
+
+### S5t: the plugin root comes from Claude Code (4.9.2)
+
+The hook runs the plugin's own scripts (`recall/launch.mjs`, `brief.mjs`, `brief-push.mjs`, `session-push.mjs`,
+`rule-check.mjs`, `doctor.mjs`, `harden.mjs`) from `trustedPluginRoot` (`host/plugin-root.ts`): `$.plugin.root`, the
+directory Claude Code loaded the hooks module from, when it is an absolute path without `..` or a control character.
+Only when the host gives none is the `recallPluginRoot` option used, under the same path check; with neither, nothing is
+run and the hook logs `reason=no_plugin_root`. `CLAUDE_PLUGIN_ROOT` is never read: a project's `.claude/settings.json`
+or `settings.local.json` sets it for the whole session through its `env` block (measured on Claude Code 2.1.292), so a
+cloned repository could point the hook at a script of its own. `recall/brief.mjs` no longer takes a binary from the
+environment either. The dollar-spelling rule allows exactly `$.plugin.root` and `$.plugin.name` read as a value.
+Gate tests: compact, "4.9.2: $.plugin.root wins"; dollar-spelling; capture-security, "runs harden.mjs from the trusted
+plugin root".
+
+### S5u: an owner-only capture store, redacted at first write (4.9.2)
+
+`$.fs.write` takes no mode, so the hook runs `harden.mjs` through `$.process.run` (`host/capture-mode.ts`, best effort,
+5 s timeout, never failing a hook; awaited only at session start): once per capture root per process at session
+start, before the first capture write, `<root>/.exovault` and `<root>/.exovault/s4-capture` become 0700; after each
+turn's capture and each cut's writes, the session directory becomes 0700 and every file in it 0600. Symbolic links are
+not followed. Files the plugin writes with Node (`setup.cjs`, brief and session push, cleanup, vectors) pass explicit
+0700/0600 modes. Once a held brief is back in the prompt box, `held-brief.md` (the one verbatim, unredacted copy of a
+prompt) is deleted; a brief that is not returned keeps its 0600 copy. On Windows `chmod` only toggles the read-only
+flag; the store keeps the ACL it inherits.
+
+Captured records, the task card the fork writes and the working-directory snapshot are redacted (`redactCapturedText`,
+`redactHostPath`) before they are written, not only when the seed reads them back. Gate: `capture-security.gate.test.ts`.
+
+### S5v: section bodies cannot forge seed structure (4.9.2)
+
+`renderSeed` passes every body (every string of `SeedSections` and each verbatim user line) through `guardSectionBody`
+(`core/seed-guard.ts`) before it adds the seed's own headings, so the seed's headings are never touched:
+
+- CR, CRLF, VT, FF, NEL, U+2028 and U+2029 become `\n` first;
+- a line whose `#` or `##` heading names a seed section (Constraints, Task card, Since the card, Task brief, Compaction
+  pressure, Key facts, Working notes, Transcript, Contract, Todo, Earlier user messages, Values, Current values, Earlier
+  assistant notes, Gates and errors, File pointers, Next step, Work state, Recipes, Session map, IDs; exact, or followed
+  by ` (` or `:`) becomes `###`. This holds after a quote marker, table pipe or list marker, inside code fences, after
+  NFKC folding, with format characters and combining marks removed, and with emphasis marks and closing `#` or `|`
+  ignored. A setext underline (`==`, `--`) under such a name is dropped;
+- `<session-memory`, `</session-memory` and `<system-reminder` (also with `＜`, `﹤`, `&lt;`, `&#60;` or `&#x3c;`, and
+  with spaces after the bracket) get `‹` in place of the bracket, so a body can neither close the seed's wrapper nor
+  open a reminder.
+
+`###` headings and every other heading or text are left as written. `extractAdoptedFileConstraints` adopts a file only
+when `userAuthoredText` (the message without Claude Code's reminders and hook output) asks to follow it; constraints
+otherwise come only from `kind: 'user'` records, which never hold tool results. Gate: `seed-guard.gate.test.ts`.
+
+### 4.9.2: pinned vectors runtime and Windows pipe name
+
+`ensureRuntime` writes `package.json` and `package-lock.json` from `recall/runtime-lock.json` (lockfile v3, root
+dependency `@huggingface/transformers` 4.3.0 exact, an npm registry integrity hash for every package) and runs
+`npm ci --ignore-scripts --no-audit --no-fund --omit=dev`. The skipped scripts are protobufjs's version warning and
+onnxruntime-node's download of the CUDA and TensorRT providers, which `prune` deletes anyway; the CPU binary ships in the
+package. The model loads with `revision` `MODEL_REVISION` (a hub commit). `READY` records `model`, `revision` and
+`runtime`; `runtimeReady` is true only when all three match, so an install from before 4.9.2 installs again once.
+
+`socketPath` names a Windows pipe `\\.\pipe\exo-recall-<session prefix>-<instance>-<32 hex random>`; Unix sockets keep
+`<socketDir>/<prefix>-<instance>.sock` in the owner-only socket directory. Gates: recall-vectors, "4.9.2: the vectors
+runtime is pinned"; session-push, "4.9.2: a Windows pipe name cannot be guessed".
