@@ -40,7 +40,7 @@ main() {
     die "$dir exists and is not an exo-compact clone. Move it away, or set EXO_COMPACT_HOME to another folder."
   else
     say "downloading to $dir"
-    git clone --quiet --depth 1 --branch "$ref" "$repo" "$dir" || die "could not clone $repo."
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$ref" "$repo" "$dir" || die "could not clone $repo."
   fi
 
   # The preflight check stops here on a Node.js or Claude Code that is too old.

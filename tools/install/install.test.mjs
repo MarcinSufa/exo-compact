@@ -119,6 +119,16 @@ test('install.sh: a fresh install clones, registers the plugin with only the plu
   assertFreshInstall(box, runSh(box.env));
 });
 
+test('install.sh: a fresh install from the release tag prints no detached-HEAD advice', { skip: noPosix }, () => {
+  const box = sandbox();
+  const tagged = git(box.source, 'rev-parse', 'HEAD');
+  const result = runSh(box.env);
+  assertFreshInstall(box, result);
+  assert.equal(git(box.clone, 'rev-parse', 'HEAD'), tagged, `the clone is at ${releaseTag}`);
+  assert.doesNotMatch(result.stdout, /detached HEAD|advice\.detachedHead/);
+  assert.doesNotMatch(result.stderr, /detached HEAD|advice\.detachedHead/);
+});
+
 test('install.sh: the check before the install does not warn that the folder is not turned on yet', { skip: noPosix }, () => {
   const box = sandbox();
   const result = runSh(box.env, { cwd: box.dir });
@@ -252,6 +262,16 @@ test('install.sh: a folder that is not a clone is left alone', { skip: noPosix }
 test('install.ps1: a fresh install clones, registers the plugin with only the plugin directory and Node set, and writes no flag file', { skip: noPwsh }, () => {
   const box = sandbox();
   assertFreshInstall(box, runPs1(box.env));
+});
+
+test('install.ps1: a fresh install from the release tag prints no detached-HEAD advice', { skip: noPwsh }, () => {
+  const box = sandbox();
+  const tagged = git(box.source, 'rev-parse', 'HEAD');
+  const result = runPs1(box.env);
+  assertFreshInstall(box, result);
+  assert.equal(git(box.clone, 'rev-parse', 'HEAD'), tagged, `the clone is at ${releaseTag}`);
+  assert.doesNotMatch(result.stdout, /detached HEAD|advice\.detachedHead/);
+  assert.doesNotMatch(result.stderr, /detached HEAD|advice\.detachedHead/);
 });
 
 test('install.ps1: the check before the install does not warn that the folder is not turned on yet', { skip: noPwsh }, () => {

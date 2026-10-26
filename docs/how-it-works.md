@@ -45,7 +45,8 @@ Constraints · Task card · Task brief · Work state · Session map · Working n
 - **Refusals.** If the model refuses after a seeded cut, the next cut goes to native compaction.
 - **Subagents** always use native compaction.
 
-A cut takes about 0.2 seconds. Native compaction takes about 30 seconds because it calls the model.
+A cut takes about 0.4 seconds at the median. Native compaction takes about 62 seconds at the median because it
+calls the model.
 
 ## 3. After the cut
 

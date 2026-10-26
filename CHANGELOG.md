@@ -41,6 +41,10 @@ Security release from a pre-launch audit. See `SECURITY.md` for the policy and h
     another one installs again instead of loading binaries `prune` removed.
   - `SECURITY.md` states that everything stays local in the default configuration and names the two opt-in features
     that send data to Jev, `jevEnabled` and `ruleCheck`.
+- First installs no longer print Git's detached-HEAD advice (#75).
+- README: a new lead (0.4 s instead of 62 s, no model call), a three-step "How it works" (capture, deterministic
+  rebuild, recall with `search_session`) and a new how-it-works graphic. `docs/assets/social-preview.png` is the
+  1280x640 repository preview image.
 
 ## 4.9.1 - 2026-10-25
 

@@ -35,7 +35,7 @@ function Install-ExoCompact {
         throw "$dir exists and is not an exo-compact clone. Move it away, or set EXO_COMPACT_HOME to another folder."
     } else {
         Write-Host "exo-compact: downloading to $dir"
-        & git clone --quiet --depth 1 --branch $ref $repo $dir
+        & git -c advice.detachedHead=false clone --quiet --depth 1 --branch $ref $repo $dir
         if ($LASTEXITCODE -ne 0) { throw "could not clone $repo." }
     }
 
