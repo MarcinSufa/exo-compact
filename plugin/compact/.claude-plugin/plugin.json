@@ -37,7 +37,7 @@
     "recallPluginRoot": {
       "type": "string",
       "title": "Recall plugin directory",
-      "description": "Absolute directory of this plugin, used to start the recall index worker. Empty falls back to CLAUDE_PLUGIN_ROOT.",
+      "description": "Absolute directory of this plugin, used only when Claude Code does not report the plugin directory itself. A relative path or one with .. is ignored. The CLAUDE_PLUGIN_ROOT variable is not read.",
       "default": ""
     },
     "interactiveOnly": {

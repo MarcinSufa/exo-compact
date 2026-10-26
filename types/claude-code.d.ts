@@ -37,6 +37,8 @@ declare module 'claude-code' {
       fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; auth?: string; socketPath?: string }): Promise<{ status: number; ok: boolean; headers: Record<string, string>; text: string }>;
     };
     model: { fork(request: { prompt: string }): Promise<{ isAnswered: true; text: string } | { isAnswered: false; reason: 'nothing-to-fork' }> };
+    /** The plugin's own manifest name and directory (the one holding `.claude-plugin/plugin.json`), set by Claude Code. */
+    plugin: { name: string; root: string };
     process: { run(argv: readonly string[], init?: { cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number }): Promise<ProcessRunResult> };
     prompt: {
       fill(args: { text: string; mode?: 'replace' | 'append' | 'insert' }): Promise<{ isFilled: boolean; refusal?: 'no_composer' | 'dialog'; text: string; cursor: number }>;

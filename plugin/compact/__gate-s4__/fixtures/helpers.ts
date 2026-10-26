@@ -195,6 +195,8 @@ export async function withStrippedRuntimeGlobals<T>(run: () => Promise<T> | T): 
 
 /** The slice of `$` a `session.compact`/`turn.complete` handler gets (cc.d.ts:2600-2631, 2320-2367). */
 export interface FakeHost {
+  /** 4.9.2: Claude Code's own report of the plugin directory; `root` is '' unless a test sets `pluginRoot`. */
+  plugin: { name: string; root: string };
   fs: {
     read: (path: string) => Promise<string>;
     write: (path: string, text: string) => Promise<void>;
@@ -263,8 +265,10 @@ export function fakeHost(overrides: {
   envSet?: FakeHost['env']['set'];
   httpFetch?: FakeHost['http']['fetch'];
   processRun?: FakeHost['process']['run'];
+  pluginRoot?: string;
 } = {}): FakeHost {
   return {
+    plugin: { name: 'exo-compact', root: overrides.pluginRoot ?? '' },
     fs: {
       read: overrides.fsRead ?? (async () => ''),
       write: overrides.fsWrite ?? (async () => {}),

@@ -55,6 +55,11 @@ interface DollarViolation {
  * passed as a value (`makeFsCaptureStore($.fs, baseDir)`), `$` assigned to a variable
  * (`currentHost = $`, `const x = $`), `$` as a single-level call (`$.log(...)`) or any other shape
  * -- is a violation.
+ *
+ * 4.9.2 adds one more allowed shape: exactly `$.plugin.root` or `$.plugin.name` read as a value. `plugin` is the one
+ * noun of the host API that is plain data rather than calls, and the host's own type file spells it that way in its
+ * `$.fs.read` example (`` `${$.plugin.root}/hooks/weights.bin` ``). Any other `$.plugin` shape (bare `$.plugin`, a
+ * different member, `$.plugin` passed as a value) is still a violation.
  */
 function findDollarViolations(source: string, fileName: string): DollarViolation[] {
   const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
@@ -71,10 +76,21 @@ function findDollarViolations(source: string, fileName: string): DollarViolation
     return ts.isCallExpression(call) && call.expression === eventAccess;
   };
 
+  const isPluginDataRead = (identifier: ts.Identifier): boolean => {
+    const nounAccess = identifier.parent;
+    if (!ts.isPropertyAccessExpression(nounAccess) || nounAccess.expression !== identifier) return false;
+    if (nounAccess.name.text !== 'plugin') return false;
+    const memberAccess = nounAccess.parent;
+    if (!ts.isPropertyAccessExpression(memberAccess) || memberAccess.expression !== nounAccess) return false;
+    if (memberAccess.name.text !== 'root' && memberAccess.name.text !== 'name') return false;
+    const user = memberAccess.parent;
+    return !(ts.isCallExpression(user) && user.expression === memberAccess);
+  };
+
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === '$') {
       const isParameterName = ts.isParameter(node.parent) && node.parent.name === node;
-      if (!isParameterName && !isDollarNounEventCall(node)) {
+      if (!isParameterName && !isDollarNounEventCall(node) && !isPluginDataRead(node)) {
         violations.push({ line: lineOf(node), detail: node.parent.getText(sourceFile).slice(0, 100) });
       }
     }
@@ -167,6 +183,24 @@ describe('dollar-spelling gate (round 11): the hook compiler\'s $ spelling rule'
     `;
     const violations = findDollarViolations(source, 'same-file-helper.ts');
     expect(violations.map((v) => v.detail)).toContain('helper($)');
+  });
+
+  it('4.9.2: accepts exactly $.plugin.root / $.plugin.name as values and still flags every other $.plugin shape', () => {
+    const source = `
+      export const register = (on) => {
+        on('session.compact', async ($, e, next) => {
+          const root = $.plugin.root;
+          await $.ui.log(\`\${$.plugin.name} at \${$.plugin.root}\`);
+          const bare = $.plugin;
+          const other = $.plugin.options;
+          use($.plugin);
+          return next(e);
+        });
+      };
+    `;
+    const lines = findDollarViolations(source, 'plugin-root.ts').map((v) => v.line);
+    // Line 1 is the template's leading newline: the reads sit on 4 and 5, the three rejected shapes on 6, 7 and 8.
+    expect(lines).toEqual([6, 7, 8]);
   });
 
   it('the checker accepts on("<event>", hook) and a plain next(e) call, and does not flag next.to', () => {

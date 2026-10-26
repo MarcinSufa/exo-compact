@@ -193,7 +193,8 @@ describe('SessionStart preflight', () => {
         list: async () => [],
       },
       ui: { log: (line: string) => { logs.push(line); } },
-      env: { get: (name: string) => ({ HOME: '/home/u', CLAUDE_PLUGIN_ROOT: '/plugin' } as Record<string, string>)[name] },
+      plugin: { name: 'exo-compact', root: '/plugin' },
+      env: { get: (name: string) => ({ HOME: '/home/u' } as Record<string, string>)[name] },
       process: { run: async (argv: string[]) => { runs.push(argv); return { exitCode: 1, stdout: 'exo-compact: Node 20.1.0 is too old, need a newer one; exo-compact stays off.\n', stderr: '' }; } },
       clock: { sleep: (ms: number) => (ms === 0 ? Promise.resolve() : new Promise(() => undefined)), now: () => 0 },
     };
@@ -226,7 +227,8 @@ describe('SessionStart preflight', () => {
         list: async () => [],
       },
       ui: { log: (line: string) => { logs.push(line); } },
-      env: { get: (name: string) => ({ HOME: '/home/u', CLAUDE_PLUGIN_ROOT: '/plugin' } as Record<string, string>)[name] },
+      plugin: { name: 'exo-compact', root: '/plugin' },
+      env: { get: (name: string) => ({ HOME: '/home/u' } as Record<string, string>)[name] },
       process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
       clock: { sleep: (ms: number) => (ms === 0 ? Promise.resolve() : new Promise(() => undefined)), now: () => 0 },
     };

@@ -60,7 +60,7 @@ function claimDigest(file) {
 }
 
 function claudeBin() {
-  if (process.env.EXOVAULT_CLAUDE_BIN) return process.env.EXOVAULT_CLAUDE_BIN;
+  // 4.9.2: no environment override: a project's settings `env` block reaches this process and could name any binary.
   const local = path.join(os.homedir(), '.local', 'bin', 'claude');
   return fs.existsSync(local) ? local : 'claude';
 }

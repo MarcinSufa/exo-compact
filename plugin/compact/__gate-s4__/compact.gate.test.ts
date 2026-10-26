@@ -1162,7 +1162,7 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
   it('recallEnabled starts only the detached launcher and points the seed at the MCP recall tool', async () => {
     const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const $ = fakeHost({ fsExists, processRun, envGet: async (name) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined });
+    const $ = fakeHost({ fsExists, processRun, pluginRoot: '/plugins/exo-compact', envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
     const handlers = harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false });
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
     const event: CompactEvent = { trigger: 'auto', messages: bulkyToolConversation() };
@@ -1177,25 +1177,27 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
   it('turn.complete refreshes the recall index after an answer (turn trigger), and not when recall is off', async () => {
     const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined;
-    const $ = fakeHost({ fsExists, processRun, envGet });
+    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : undefined;
+    const pluginRoot = '/plugins/exo-compact';
+    const $ = fakeHost({ fsExists, processRun, envGet, pluginRoot });
     await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, recallVectors: false })['turn.complete']($, { reason: 'answer' }, async () => ({})));
     expect(processRun).toHaveBeenCalledTimes(1);
     expect(processRun.mock.calls[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'lexical', 'turn', '30']);
     const processRunOff = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    await withStrippedRuntimeGlobals(() => harness({})['turn.complete'](fakeHost({ fsExists, processRun: processRunOff, envGet }), { reason: 'answer' }, async () => ({})));
+    await withStrippedRuntimeGlobals(() => harness({})['turn.complete'](fakeHost({ fsExists, processRun: processRunOff, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
     expect(processRunOff).not.toHaveBeenCalled();
   });
 
   it('retentionDays reaches the launcher at a cut and after an answer; 0 turns retention off', async () => {
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/plugins/exo-compact' : undefined;
+    const envGet = async (name: string) => name === 'HOME' ? '/home/u' : undefined;
+    const pluginRoot = '/plugins/exo-compact';
     const cutRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
-    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, retentionDays: 0 })['session.compact'](fakeHost({ fsExists, processRun: cutRun, envGet }), { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
+    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, retentionDays: 0 })['session.compact'](fakeHost({ fsExists, processRun: cutRun, envGet, pluginRoot }), { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
     expect(cutRun.mock.calls[0][0].slice(-2)).toEqual(['cut', '0']);
     const turnRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, retentionDays: 7 })['turn.complete'](fakeHost({ fsExists, processRun: turnRun, envGet }), { reason: 'answer' }, async () => ({})));
+    await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, retentionDays: 7 })['turn.complete'](fakeHost({ fsExists, processRun: turnRun, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
     expect(turnRun.mock.calls[0][0].slice(-2)).toEqual(['turn', '7']);
   });
 
@@ -1213,20 +1215,29 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     expect(files.get(ignores[0])).toBe(CAPTURE_GITIGNORE);
   });
 
-  it('recallPluginRoot userConfig wins over CLAUDE_PLUGIN_ROOT, and a missing root is logged', async () => {
-    const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+  it('4.9.2: $.plugin.root wins, CLAUDE_PLUGIN_ROOT from a project env block is ignored, recallPluginRoot is only a safe absolute fallback', async () => {
     const fsExists = vi.fn(async (target: string) => target.endsWith('/.exovault/s4-compact-active') || target.endsWith('.jsonl'));
-    const $ = fakeHost({ fsExists, processRun, envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
-    const handlers = harness({ contract: 'the contract', recallEnabled: true, recallPluginRoot: '/explicit/plugin', workStateProbe: false });
+    // A cloned repository's .claude/settings.json `env` block reaches $.env.get for the whole session.
+    const hostileEnv = async (name: string) => name === 'HOME' ? '/home/u' : name === 'CLAUDE_PLUGIN_ROOT' ? '/tmp/evil-env' : undefined;
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
-    await withStrippedRuntimeGlobals(() => handlers['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(processRun.mock.calls[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
-    const log = vi.fn();
-    const processRun2 = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    const $2 = fakeHost({ fsExists, processRun: processRun2, uiLog: log, envGet: async (name) => name === 'HOME' ? '/home/u' : undefined });
-    await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false })['session.compact']($2, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(processRun2).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith('recall.build_started=0 reason=no_plugin_root');
+    const cut = (options: Record<string, unknown>, $: ReturnType<typeof fakeHost>) =>
+      withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, ...options })['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
+
+    const engineRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: engineRun, envGet: hostileEnv, pluginRoot: '/plugins/exo-compact/' }));
+    expect(engineRun.mock.calls[0][0][1]).toBe('/plugins/exo-compact/recall/launch.mjs');
+
+    const optionRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: optionRun, envGet: hostileEnv }));
+    expect(optionRun.mock.calls[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
+
+    for (const unsafe of ['relative/plugin', '/opt/../tmp/evil', '']) {
+      const log = vi.fn();
+      const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+      await cut({ recallPluginRoot: unsafe }, fakeHost({ fsExists, processRun: run, uiLog: log, envGet: hostileEnv }));
+      expect(run, unsafe).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith('recall.build_started=0 reason=no_plugin_root');
+    }
   });
 
   it('is rendered in the seed when the derived transcript file exists', async () => {

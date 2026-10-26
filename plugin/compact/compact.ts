@@ -47,6 +47,7 @@ import { buildDenseJevRequests, denseJevQuery, parseDenseJevAnswers } from './co
 import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent } from './core/work-state.js';
 import type { WorkStateProbe } from './core/work-state.js';
 import { runPreflight } from './host/preflight.js';
+import { trustedPluginRoot } from './host/plugin-root.js';
 import { renderSessionMap } from './core/session-map.js';
 import type { SessionSegment } from './core/session-map.js';
 
@@ -129,7 +130,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         preflight.checked.add(sessionId);
         const result = await runPreflight({
           claudeVersion: async () => { const version = await $.session.version(); return version.base ?? version.version; },
-          pluginRoot: async () => optionString(options, 'recallPluginRoot', '') || (await $.env.get('CLAUDE_PLUGIN_ROOT')),
+          pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')),
           run: (argv: string[], init: { timeoutMs: number }) => $.process.run(argv, init),
         });
         preflight.inert = !result.ok;
@@ -280,7 +281,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const captureRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert });
           if (captureRoot === null) return;
           if (interactiveOnly && !(await attendedSession({ surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD') }))) return;
-          const pluginRoot = optionString(options, 'recallPluginRoot', '') || (await $.env.get('CLAUDE_PLUGIN_ROOT'));
+          const pluginRoot = trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', ''));
           if (!pluginRoot) return;
           const recallRoot = `${(await homeDir()) ?? '.'}/.claude/exovault/recall`;
           void $.process.run(['node', `${pluginRoot}/recall/brief.mjs`, 'save', recallRoot, String(await $.session.id()), checklistModel(options)], { stdin: brief, timeoutMs: 5000 })
@@ -400,11 +401,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // 3.43.0: on by default (ctxbench Haiku: 33/39 without it, 37/39 with it, ~1.2k tokens over 125 turns).
     const sessionPushOn = pushText !== undefined && optionBoolean(options, 'recallEnabled', true) && optionBoolean(options, 'sessionPush', true);
     if (briefPushOn || sessionPushOn) {
-      const pushHost: BriefPushHost = { cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), home: homeDir, inert: () => preflight.inert, pluginRoot: () => $.env.get('CLAUDE_PLUGIN_ROOT'), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line), fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; socketPath: string }) => $.http.fetch(url, init), after: (ms: number, fn: () => void) => $.clock.after(ms, fn), now: () => $.clock.now() };
-      const pluginRootOption = optionString(options, 'recallPluginRoot', '');
+      const pushHost: BriefPushHost = { cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), home: homeDir, inert: () => preflight.inert, pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line), fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; socketPath: string }) => $.http.fetch(url, init), after: (ms: number, fn: () => void) => $.clock.after(ms, fn), now: () => $.clock.now() };
       return Promise.all([
-        briefPushOn ? runBriefPush(pushHost, { prompt: pushText! }, pluginRootOption) : Promise.resolve(undefined),
-        sessionPushOn ? runSessionPush(pushHost, pushText!, pluginRootOption) : Promise.resolve(undefined),
+        briefPushOn ? runBriefPush(pushHost, { prompt: pushText! }) : Promise.resolve(undefined),
+        sessionPushOn ? runSessionPush(pushHost, pushText!) : Promise.resolve(undefined),
       ]).then((notes) => {
         const added = notes.filter((note): note is string => Boolean(note));
         return next(added.length ? { ...input, context: [...(input.context ?? []), ...added] } : input);
@@ -1119,10 +1119,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
           if (foundPath) transcriptPathCache.set(sessionId, foundPath); else transcriptPathCache.delete(sessionId);
           const transcriptPath = resolveTranscriptPath(null, foundPath);
           const transcriptFileExists = transcriptPath !== null;
-          // The harness/userConfig names the plugin dir explicitly: a function hook's process env
-          // carries no per-plugin CLAUDE_PLUGIN_ROOT, so the env var is only a fallback.
+          // 4.9.2 (CONTRACT S5t): Claude Code's own $.plugin.root; the option only when the host has none (host/plugin-root.ts).
           const configuredRecallRoot = optionString(options, 'recallPluginRoot', '');
-          const recallPluginRoot = recallEnabled ? (configuredRecallRoot || (await $.env.get('CLAUDE_PLUGIN_ROOT'))) : undefined;
+          const recallPluginRoot = recallEnabled ? trustedPluginRoot(() => $.plugin.root, configuredRecallRoot) : undefined;
           if (recallEnabled && !recallPluginRoot) notice('recall.build_started=0 reason=no_plugin_root');
           if (!transcriptFileExists) notice('seed.transcript_pointer=missing');
           const transcriptPointer = transcriptFileExists && transcriptPath
@@ -1418,7 +1417,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // main loop's first stop reads them (classic.Stop below). Not awaited, like every process the hook starts.
       if (briefCheckArmed) {
         const briefCheckPath = `${baseDir}/${BRIEF_CHECK_FILE}`;
-        const briefCheckRoot = optionString(options, 'recallPluginRoot', '') || (await $.env.get('CLAUDE_PLUGIN_ROOT'));
+        const briefCheckRoot = trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', ''));
         try {
           await $.fs.write(briefCheckPath, BRIEF_CHECK_ARMED);
           if (!briefCheckRoot) throw new Error('no plugin root');
@@ -1524,7 +1523,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // 3.25.0 (CONTRACT S4x): refresh the recall index and its vectors after every answer, so a cut finds
       // them ready instead of starting a build. The worker skips small growth; the launch is not awaited.
       if (optionBoolean(options, 'recallEnabled', true)) {
-        const recallPluginRootForTurn = optionString(options, 'recallPluginRoot', '') || (await $.env.get('CLAUDE_PLUGIN_ROOT'));
+        const recallPluginRootForTurn = trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', ''));
         const sessionIdForTurn = String(await $.session.id());
         const cachedTurnPath = transcriptPathCache.get(sessionIdForTurn);
         const turnTranscript = cachedTurnPath ?? await findTranscriptPath({ cwd: () => $.session.cwd(), home: homeDir, configDir: () => $.env.get('CLAUDE_CONFIG_DIR') }, sessionIdForTurn, { exists: (path) => $.fs.exists(path), list: (path) => $.fs.list(path) });
@@ -1549,7 +1548,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const notice = noticeLog({ emit: (...args: [string, { to: 'debug' }?]) => $.ui.log(...args), surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD'), logFile: async () => { const noticeRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert }); return noticeRoot === null ? undefined : `${capturePath(String(await $.session.id()), noticeRoot)}/notices.log`; }, read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), now: () => $.clock.now() });
     const target = optionBoolean(options, 'briefPush', false) ? pushTarget(call as { tool: string; [argument: string]: unknown }) : undefined;
     if (!target) return next(call);
-    const note = await runBriefPush({ cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), home: homeDir, inert: () => preflight.inert, pluginRoot: () => $.env.get('CLAUDE_PLUGIN_ROOT'), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line) }, target, optionString(options, 'recallPluginRoot', ''));
+    const note = await runBriefPush({ cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), home: homeDir, inert: () => preflight.inert, pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line) }, target);
     const below = await next(call);
     return note ? { ...below, additionalContext: [...(below.additionalContext ?? []), note] } : below;
   }).catch(($, call, next) => {
@@ -1568,7 +1567,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (!optionBoolean(options, 'recallEnabled', true) || !optionBoolean(options, 'briefLimits', true)) return below;
     const target = pushTarget({ ...((input.tool_input ?? {}) as Record<string, unknown>), tool: input.tool_name });
     if (!target) return below;
-    const note = await runBriefLimits({ cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), home: homeDir, inert: () => preflight.inert, pluginRoot: () => $.env.get('CLAUDE_PLUGIN_ROOT'), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line) }, target.files, optionString(options, 'recallPluginRoot', ''));
+    const note = await runBriefLimits({ cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), home: homeDir, inert: () => preflight.inert, pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { stdin: string; timeoutMs: number }) => $.process.run(argv, init), log: (line: string) => notice(line) }, target.files);
     return note ? { ...below, additionalContext: [...(below.additionalContext ?? []), note] } : below;
   }).catch(($, input, next) => {
     try { $.ui.log(`hook.caught=classic.PostToolUse kind=${next.error.kind}`, { to: 'debug' }); } catch { /* debug logging cannot block a tool result */ }
@@ -1604,7 +1603,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const cardStale = (newestBriefId !== undefined && newestBriefId !== cardBriefId) || (await readCardBriefId()) !== cardBriefId;
       if (ruleCheckOn && cardStale && stopCardText !== undefined) notice('rule_check.fired=0 reason=card_stale');
       if (ruleCheckOn && !cardStale && (await jevEgressAllowed(flagHost, true, ruleDenyList)) && stopCardText !== undefined) {
-        const ruleRoot = optionString(options, 'recallPluginRoot', '') || (await $.env.get('CLAUDE_PLUGIN_ROOT'));
+        const ruleRoot = trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', ''));
         const ranPromise = ruleRoot
           ? $.process.run(['node', `${ruleRoot}/recall/rule-check.mjs`, String(await $.session.cwd())], {
             stdin: JSON.stringify({ card: stopCardText, report: input.last_assistant_message ?? '' }),
@@ -1673,9 +1672,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
  * 3.41.0 (CONTRACT S4zm): the note for a write whose added lines break the newest brief's line-length limit, from
  * `recall/brief-push.mjs limits`, or undefined (clean write, no brief or limit, any failure or timeout).
  */
-async function runBriefLimits(host: BriefPushHost, files: readonly string[], pluginRootOption: string): Promise<string | undefined> {
+async function runBriefLimits(host: BriefPushHost, files: readonly string[]): Promise<string | undefined> {
   try {
-    const pluginRoot = pluginRootOption || (await host.pluginRoot());
+    const pluginRoot = await host.pluginRoot();
     if (!pluginRoot) return undefined;
     const recallRoot = `${(await host.home()) ?? '.'}/.claude/exovault/recall`;
     const ran = await host.run(['node', `${pluginRoot}/recall/brief-push.mjs`, 'limits', recallRoot, String(await host.id()), await host.cwd()], { stdin: JSON.stringify({ files }), timeoutMs: BRIEF_LIMITS_TIMEOUT_MS });
@@ -1713,14 +1712,14 @@ type BriefPushHost = {
  * 3.40.0 (CONTRACT S4zl): the brief lines to push for a write or a prompt, as the note the model reads, or
  * undefined (no cut yet, push off for this task, nothing new found, any failure). brief-push.mjs keeps the state.
  */
-async function runBriefPush(host: BriefPushHost, input: BriefPushInput, pluginRootOption: string): Promise<string | undefined> {
+async function runBriefPush(host: BriefPushHost, input: BriefPushInput): Promise<string | undefined> {
   try {
     const captureRoot = await findCaptureRoot({ cwd: host.cwd, exists: host.exists, root: host.root, home: host.home, inert: host.inert });
     if (captureRoot === null) return undefined;
     const sessionId = String(await host.id());
     const statePath = `${capturePath(sessionId, captureRoot)}/${BRIEF_PUSH_FILE}`;
     if (!(await host.exists(statePath)) || (await host.read(statePath)).trim() === BRIEF_PUSH_OFF) return undefined;
-    const pluginRoot = pluginRootOption || (await host.pluginRoot());
+    const pluginRoot = await host.pluginRoot();
     if (!pluginRoot) return undefined;
     const recallRoot = `${(await host.home()) ?? '.'}/.claude/exovault/recall`;
     const ran = await host.run(['node', `${pluginRoot}/recall/brief-push.mjs`, recallRoot, sessionId, statePath], { stdin: JSON.stringify(input), timeoutMs: BRIEF_PUSH_TIMEOUT_MS });
@@ -1737,12 +1736,12 @@ async function runBriefPush(host: BriefPushHost, input: BriefPushInput, pluginRo
  * 3.42.0 (CONTRACT S4zn): the compacted-away session lines for a prompt, as the note the model reads, or undefined
  * (no capture, no cut yet, nothing rare in the prompt, all shown since the last cut, any failure).
  */
-async function runSessionPush(host: BriefPushHost, prompt: string, pluginRootOption: string): Promise<string | undefined> {
+async function runSessionPush(host: BriefPushHost, prompt: string): Promise<string | undefined> {
   try {
     const captureRoot = await findCaptureRoot({ cwd: host.cwd, exists: host.exists, root: host.root, home: host.home, inert: host.inert });
     if (captureRoot === null) return undefined;
     const sessionId = String(await host.id());
-    const pluginRoot = pluginRootOption || (await host.pluginRoot());
+    const pluginRoot = await host.pluginRoot();
     if (!pluginRoot) return undefined;
     const recallRoot = `${(await host.home()) ?? '.'}/.claude/exovault/recall`;
     const statePath = `${capturePath(sessionId, captureRoot)}/${SESSION_PUSH_FILE}`;
