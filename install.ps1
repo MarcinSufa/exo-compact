@@ -43,12 +43,15 @@ function Install-ExoCompact {
     & node $setup doctor --preflight | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'the check above failed, so nothing was registered with Claude Code.' }
 
-    # The same call installs and re-configures: it sets only the plugin directory, so the other options
-    # stay at the manifest defaults, or as the user left them on a later run.
+    # The same call installs and re-configures: it sets only the plugin directory and the Node binary, so the
+    # other options stay at the manifest defaults, or as the user left them on a later run. The hook runs its
+    # scripts with that absolute Node, not the first node on a PATH a project can change (CONTRACT S5w).
+    $nodeBin = (& node -p process.execPath | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $nodeBin) { throw 'could not find the path of node.' }
     & claude plugin marketplace add $dir | Out-Null
     # EBUSY here is Windows refusing to delete the old marketplace copy while a terminal or editor has a folder in it open.
     if ($LASTEXITCODE -ne 0) { throw "claude could not add the marketplace at $dir. If it said EBUSY (resource busy or locked), close every terminal and editor open in $dir or in $(Join-Path $HOME '.claude\plugins\marketplaces\exo-compact') and run the installer again." }
-    & claude plugin install exo-compact@exo-compact --config "recallPluginRoot=$plugin" | Out-Null
+    & claude plugin install exo-compact@exo-compact --config "recallPluginRoot=$plugin" --config "nodePath=$nodeBin" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'claude could not install the plugin.' }
     # A Claude Code that copies the plugin instead of reading it from the clone needs these two.
     & claude plugin marketplace update exo-compact | Out-Null

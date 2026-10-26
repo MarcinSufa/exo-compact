@@ -31,7 +31,10 @@ export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 if [[ -n "${S4_WINDOW:-}" ]]; then
   export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$S4_WINDOW"
 fi
-OPTS="{\"recallEnabled\":true,\"recallPluginRoot\":\"$S4\",\"jevEnabled\":$JEV}"
+# 4.9.2 (CONTRACT S5w): the hook starts its Node scripts with this binary, not with whatever `node` a project's env
+# block puts first on PATH. Empty when node is missing; the hook then falls back to `node`.
+NODE_BIN="$(node -p process.execPath </dev/null 2>/dev/null || true)"
+OPTS="{\"recallEnabled\":true,\"recallPluginRoot\":\"$S4\",\"nodePath\":\"$NODE_BIN\",\"jevEnabled\":$JEV}"
 # A global install (claude plugin install ...@exo-compact) already loads the plugin; adding
 # --plugin-dir would load a second copy, so only its options are passed.
 INSTALLED="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
@@ -42,7 +45,7 @@ if [[ -f "$INSTALLED" ]] && grep -q '"exovault-s4-compact@exo-compact"' "$INSTAL
   exit 1
 fi
 if [[ -f "$INSTALLED" ]] && grep -q '"exo-compact@exo-compact"' "$INSTALLED"; then
-  GLOBAL_OPTS="{\"recallEnabled\":true,\"recallPluginRoot\":\"$S4\",\"interactiveOnly\":true,\"jevEnabled\":$JEV}"
+  GLOBAL_OPTS="{\"recallEnabled\":true,\"recallPluginRoot\":\"$S4\",\"nodePath\":\"$NODE_BIN\",\"interactiveOnly\":true,\"jevEnabled\":$JEV}"
   exec claude --settings "{\"pluginConfigs\":{\"exo-compact@exo-compact\":{\"options\":$GLOBAL_OPTS}}}" "$@"
 fi
 SETTINGS="{\"pluginConfigs\":{\"exo-compact\":{\"options\":$OPTS},\"exo-compact@inline\":{\"options\":$OPTS}}}"

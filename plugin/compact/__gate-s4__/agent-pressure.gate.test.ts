@@ -104,6 +104,9 @@ function fakeHost(files: Map<string, string>, enabled = true) {
     env: { get: () => undefined },
     http: { fetch: async () => ({ ok: false, status: 500, text: async () => '' }) },
     clock: { sleep: async () => undefined },
+    // 4.9.2 review: the capture guard runs harden.mjs from the plugin root before any capture write; exit 0 passes.
+    plugin: { name: 'exo-compact', root: '/fake-plugin' },
+    process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
   };
 }
 

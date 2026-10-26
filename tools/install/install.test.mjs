@@ -85,6 +85,19 @@ const optout = (dir) => path.join(dir, '.exovault', 's4-compact-off');
 const runSh = (env, options = {}) => spawnSync('bash', [sh], { env, encoding: 'utf8', ...options });
 const runPs1 = (env) => spawnSync(pwsh, ['-NoProfile', '-File', ps1], { env, encoding: 'utf8' });
 
+/**
+ * The only options an install sets: the plugin directory and, since 4.9.2 (CONTRACT S5w), the absolute path of the Node
+ * that ran the installer, so the hook does not start `node` from a PATH a project can change.
+ */
+function assertInstallConfigs(install, plugin) {
+  const configs = install.filter((_, index) => install[index - 1] === '--config');
+  assert.deepEqual(configs.map((config) => config.split('=')[0]).sort(), ['nodePath', 'recallPluginRoot']);
+  const rootOption = configs.find((config) => config.startsWith('recallPluginRoot='));
+  if (plugin !== undefined) assert.equal(path.resolve(rootOption.slice('recallPluginRoot='.length)), plugin);
+  const nodePath = configs.find((config) => config.startsWith('nodePath=')).slice('nodePath='.length);
+  assert.ok(path.isAbsolute(nodePath) && fs.existsSync(nodePath), `nodePath is an existing absolute path: ${nodePath}`);
+}
+
 function assertFreshInstall(box, result) {
   assert.equal(result.status, 0, result.stderr);
   const plugin = path.join(box.clone, 'plugin', 'compact');
@@ -94,17 +107,14 @@ function assertFreshInstall(box, result) {
   assert.equal(path.resolve(calls[0][3]), box.clone);
   const install = calls.find((call) => call[1] === 'install');
   assert.deepEqual(install.slice(0, 3), ['plugin', 'install', 'exo-compact@exo-compact']);
-  const configs = install.filter((_, index) => install[index - 1] === '--config');
-  // recallEnabled and interactiveOnly come from the manifest defaults now; only the clone path is set here.
-  assert.equal(configs.length, 1);
-  const rootOption = configs.find((config) => config.startsWith('recallPluginRoot='));
-  assert.equal(path.resolve(rootOption.slice('recallPluginRoot='.length)), plugin);
+  // recallEnabled and interactiveOnly come from the manifest defaults now; only the clone path and Node are set here.
+  assertInstallConfigs(install, plugin);
   assert.ok(!fs.existsSync(flag(box.home)), 'no flag file is written: installed means enabled');
   assert.ok(!fs.existsSync(optout(box.home)), 'and nothing is opted out');
   assert.match(result.stdout, /exo-compact \d+\.\d+\.\d+ is installed/);
 }
 
-test('install.sh: a fresh install clones, registers the plugin with only the plugin directory set, and writes no flag file', { skip: noPosix }, () => {
+test('install.sh: a fresh install clones, registers the plugin with only the plugin directory and Node set, and writes no flag file', { skip: noPosix }, () => {
   const box = sandbox();
   assertFreshInstall(box, runSh(box.env));
 });
@@ -139,9 +149,7 @@ test('install.sh: a second run updates the clone and keeps the options the user 
   assert.ok(fs.existsSync(path.join(box.clone, 'NEW.txt')), 'the clone was updated');
   const calls = box.readCalls().slice(before);
   const install = calls.find((call) => call[1] === 'install');
-  const configs = install.filter((_, index) => install[index - 1] === '--config');
-  assert.equal(configs.length, 1, 'only the plugin directory is set again');
-  assert.match(configs[0], /^recallPluginRoot=/);
+  assertInstallConfigs(install);
   assert.ok(calls.some((call) => call.join(' ') === 'plugin marketplace update exo-compact'));
   assert.ok(calls.some((call) => call.join(' ') === 'plugin update exo-compact@exo-compact'));
   assert.match(result.stdout, /is installed/);
@@ -241,7 +249,7 @@ test('install.sh: a folder that is not a clone is left alone', { skip: noPosix }
   assert.deepEqual(box.readCalls(), []);
 });
 
-test('install.ps1: a fresh install clones, registers the plugin with only the plugin directory set, and writes no flag file', { skip: noPwsh }, () => {
+test('install.ps1: a fresh install clones, registers the plugin with only the plugin directory and Node set, and writes no flag file', { skip: noPwsh }, () => {
   const box = sandbox();
   assertFreshInstall(box, runPs1(box.env));
 });
@@ -253,7 +261,7 @@ test('install.ps1: the check before the install does not warn that the folder is
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /S4 is not enabled/);
 });
 
-test('install.ps1: a second run sets only the plugin directory again and runs the updates', { skip: noPwsh }, () => {
+test('install.ps1: a second run sets only the plugin directory and Node again and runs the updates', { skip: noPwsh }, () => {
   const box = sandbox();
   assert.equal(runPs1(box.env).status, 0);
   const installed = path.join(box.home, '.claude', 'plugins', 'installed_plugins.json');
@@ -264,7 +272,7 @@ test('install.ps1: a second run sets only the plugin directory again and runs th
   assert.equal(result.status, 0, result.stderr);
   const calls = box.readCalls().slice(before);
   const install = calls.find((call) => call[1] === 'install');
-  assert.equal(install.filter((arg) => arg === '--config').length, 1);
+  assertInstallConfigs(install);
   assert.ok(calls.some((call) => call.join(' ') === 'plugin update exo-compact@exo-compact'));
 });
 

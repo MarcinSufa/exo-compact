@@ -1,4 +1,4 @@
-import { LEGACY_OPTIONS } from './fixtures/helpers.js';
+import { LEGACY_OPTIONS, passHarden } from './fixtures/helpers.js';
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import os from 'node:os';
@@ -133,7 +133,7 @@ function host(flag: string | null) {
       list: async () => [],
     },
     env: { get: async (name: string) => (name === 'HOME' ? '/home/u' : undefined) },
-    process: { run: async (argv: string[]) => { runs.push(argv); return { exitCode: 0, stdout: '', stderr: '' }; } },
+    process: { run: passHarden(async (argv: string[]) => { runs.push(argv); return { exitCode: 0, stdout: '', stderr: '' }; }) },
     ui: { log: (line: string) => { logs.push(line); } },
   };
 }

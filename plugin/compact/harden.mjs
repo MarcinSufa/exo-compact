@@ -9,7 +9,10 @@
 // once it is back in the prompt box).
 // On Windows chmod only toggles the read-only flag: the store keeps the ACL it inherits from its parent directory.
 // Usage: node harden.mjs <root> [<session dir> [--remove <name>]]
-// Exit code 0 always: hardening is best effort and must never fail a hook.
+// 4.9.2 (CONTRACT S5u, review): exit code 0 only when every directory asked for is a real directory (not a symbolic
+// link) owned by this user and, off Windows, at 0700 afterwards; 2 otherwise. The hook writes no capture under a root
+// whose run did not exit 0, so a repository that commits `.exovault/s4-capture` as a link into its own checkout gets
+// nothing written through it.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,13 +28,23 @@ function ownSessionDir(store, sessionDir) {
   return name === '' || name === '.' || name === '..' ? undefined : resolved;
 }
 
-/** Creates `dir` when missing; a directory gets `DIR_MODE`, a symlink or file in its place stops the walk. */
+const POSIX = process.platform !== 'win32';
+
+/** A real directory (lstat, so never a link) owned by this user and, off Windows, at `DIR_MODE`. */
+function ownDir(stat) {
+  if (!stat.isDirectory()) return false;
+  if (POSIX && typeof process.getuid === 'function' && stat.uid !== process.getuid()) return false;
+  return !POSIX || (stat.mode & 0o777) === DIR_MODE;
+}
+
+/** Creates `dir` when missing and sets `DIR_MODE`; false when a link, a file or another user's directory is there. */
 function secureDir(dir) {
   try { fs.mkdirSync(dir, { mode: DIR_MODE }); } catch (error) { if (error?.code !== 'EEXIST') return false; }
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory()) return false;
+  if (POSIX && typeof process.getuid === 'function' && stat.uid !== process.getuid()) return false;
   if ((stat.mode & 0o777) !== DIR_MODE) fs.chmodSync(dir, DIR_MODE);
-  return true;
+  return ownDir(fs.lstatSync(dir));
 }
 
 function secureTree(dir, depth = 0) {
@@ -73,5 +86,6 @@ export function hardenCapture(root, sessionDir, remove) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [root, sessionDir, flag, name] = process.argv.slice(2);
-  hardenCapture(root, sessionDir, flag === '--remove' ? name : undefined);
+  const done = hardenCapture(root, sessionDir, flag === '--remove' ? name : undefined);
+  process.exitCode = done.store && (sessionDir === undefined || done.session) ? 0 : 2;
 }

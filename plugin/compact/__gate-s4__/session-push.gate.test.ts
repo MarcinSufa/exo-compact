@@ -1,4 +1,4 @@
-import { LEGACY_OPTIONS } from './fixtures/helpers.js';
+import { LEGACY_OPTIONS, passHarden } from './fixtures/helpers.js';
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -138,7 +138,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
       env: { get: async (name: string) => (name === 'HOME' ? '/home/u' : undefined) },
       clock: { now: async () => 0, after: (_ms: number, fn: () => void) => { if (server?.fireTimers) queueMicrotask(fn); return { cancel: () => {} }; } },
       http: { fetch: async (url: string, init: Parameters<Fetch>[1]) => { fetches.push({ url, init }); if (!server) throw new Error('ENOENT'); return server.fetch(url, init); } },
-      process: { run: async (argv: string[], init?: { stdin?: string }) => { runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; } },
+      process: { run: passHarden(async (argv: string[], init?: { stdin?: string }) => { runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; }) },
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};
@@ -186,7 +186,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
         fetches.push(request);
         return request;
       } },
-      process: { run: async () => { throw new Error('unexpected CLI fallback'); } },
+      process: { run: passHarden(async () => { throw new Error('unexpected CLI fallback'); }) },
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};

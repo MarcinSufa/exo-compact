@@ -46,6 +46,9 @@ function fakeHost(messages: unknown[], files: Set<string> = new Set(), fresh: st
     env: { get: () => undefined },
     http: { fetch: async () => ({ ok: false, status: 500, text: '' }) },
     clock: { sleep: async () => undefined, now: async () => Date.parse('2026-09-29T17:00:00Z') },
+    // 4.9.2 review: the capture guard runs harden.mjs from the plugin root before any capture write; exit 0 passes.
+    plugin: { name: 'exo-compact', root: '/fake-plugin' },
+    process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
   };
 }
 

@@ -38,7 +38,7 @@ const POLISH_CUE_LINES: Record<string, Array<[number, number]>> = {
   'plugin/compact/__gate-s4__/adopted.gate.test.ts': [[19, 19], [21, 21], [100, 100], [121, 121], [128, 128]],
   'plugin/compact/__gate-s4__/broken/constraints.ts': [[5, 5], [8, 8]],
   'plugin/compact/__gate-s4__/broken/key-facts.ts': [[8, 8], [13, 13]],
-  'plugin/compact/__gate-s4__/compact.gate.test.ts': [[904, 906], [912, 912], [915, 915], [954, 954]],
+  'plugin/compact/__gate-s4__/compact.gate.test.ts': [[905, 907], [913, 913], [916, 916], [955, 955]],
   'plugin/compact/__gate-s4__/constraints.gate.test.ts': [[74, 74], [87, 87], [90, 90], [131, 131], [434, 435]],
   'plugin/compact/__gate-s4__/key-facts.gate.test.ts': [[109, 109], [113, 113], [115, 115], [603, 603], [608, 609], [619, 619], [625, 625]],
   'plugin/compact/__gate-s4__/labels.gate.test.ts': [[58, 59], [61, 61]],

@@ -178,6 +178,21 @@ describe('4.9.2: the vectors runtime is pinned and installs without scripts', ()
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it('4.9.2 review: READY records the platform and CPU architecture, so a runtime moved to another one installs again', () => {
+    expect(readyStamp()).toMatchObject({ platform: process.platform, arch: process.arch });
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'exo-ready-'));
+    try {
+      const { platform, arch, ...older } = readyStamp();
+      const other = process.platform === 'win32' ? 'linux' : 'win32';
+      for (const stamp of [older, { ...older, platform }, { ...older, arch }, { ...readyStamp(), platform: other }, { ...readyStamp(), arch: arch === 'arm64' ? 'x64' : 'arm64' }]) {
+        writeFileSync(path.join(dir, 'READY'), JSON.stringify({ ...stamp, at: 'x' }));
+        expect(runtimeReady(dir), JSON.stringify(stamp)).toBe(false);
+      }
+      writeFileSync(path.join(dir, 'READY'), JSON.stringify({ ...older, platform, arch, at: 'x' }));
+      expect(runtimeReady(dir)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it.skipIf(process.platform === 'win32')('installs with npm ci --ignore-scripts from the shipped lock', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'exo-runtime-'));
     const bin = mkdtempSync(path.join(os.tmpdir(), 'exo-fake-npm-'));

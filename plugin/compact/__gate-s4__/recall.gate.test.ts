@@ -216,9 +216,10 @@ it('the hook uses only same-file $.noun.event call sites and hands indexing to a
   expect(hooks.modules).toHaveLength(1);
   expect(source).not.toMatch(/\b(?:const|let|var)\s+\w+\s*=\s*\$\s*;/);
   expect(source).not.toMatch(/\b\w+\(\s*\$\s*\)/);
-  expect(source).toContain("$.process.run(['node', launcher, transcriptPath, recallRoot, sessionId, recallVectorsEnabled ? 'vectors' : 'lexical', 'cut', retentionDays(options)]");
-  expect(source).toContain('void $.process.run');
+  // 4.9.2 (S5w): node scripts start through host/node-run.ts nodeRunner, over a same-file `$.process.run` closure.
+  expect(source).toContain("void nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path))(['node', launcher, transcriptPath, recallRoot, sessionId, recallVectorsEnabled ? 'vectors' : 'lexical', 'cut', retentionDays(options)]");
   expect(source).not.toMatch(/await\s+\$\.process\.run/);
+  expect(source).not.toMatch(/await\s+nodeRunner\([^\n]*\(\['node', [^\n]*recall\/launch\.mjs/);
   expect(readFileSync(path.join(pluginRoot, 'recall/launch.mjs'), 'utf8')).toContain('detached: true');
 });
 

@@ -8,7 +8,7 @@ Set options with `claude plugin install exo-compact@exo-compact --config key=val
 { "pluginConfigs": { "exo-compact@exo-compact": { "options": { "briefDigestModel": "" } } } }
 ```
 
-With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-compact@inline`; the launcher passes `recallEnabled`, `recallPluginRoot` and `jevEnabled` itself.
+With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-compact@inline`; the launcher passes `recallEnabled`, `recallPluginRoot`, `nodePath` and `jevEnabled` itself.
 
 ## Core
 
@@ -17,6 +17,7 @@ With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-comp
 | `recallEnabled` | boolean | `true` | Build and query a local, session-scoped history index. |
 | `retentionDays` | number | `30` | Delete the recall index and the capture directory of a session untouched for this many days (checked at most once a day by the recall build worker; captures under a project's own .exovault are left alone). 30 matches Claude Code's default for keeping transcripts; 0 keeps everything. `node setup.cjs cleanup` runs the same retention by hand, with a dry run and a backup. |
 | `recallPluginRoot` | string | `""` | Absolute directory of this plugin, used only when Claude Code does not report the plugin directory itself. A relative path or one with .. is ignored. The CLAUDE_PLUGIN_ROOT variable is not read. |
+| `nodePath` | string | `""` | Absolute path of the Node binary the hook starts its scripts with. The installers and launchers set it to the Node that ran them; a project's `env` block cannot change it. Empty, relative, with `..` or missing: `node` from `PATH`. |
 | `interactiveOnly` | boolean | `true` | Leave -p runs, the SDK and any run started from inside another session on native compaction; terminal sessions and sessions started from the VS Code or Cursor extension count as interactive. On by default, so a plugin enabled globally does not change scripted runs; set false to use exo-compact in -p and SDK runs too. A return to native compaction under this option logs `compact.fallback=interactive_only origin=compact entrypoint=<value>`. A benchmark or A/B made of `-p` runs must set `interactiveOnly=false`, or both sides use native compaction. |
 | `timeoutMs` | number | `30000` | Maximum duration in milliseconds for the S4 compaction attempt. |
 | `contract` | string | `""` | Project instructions to carry into the compacted context. |

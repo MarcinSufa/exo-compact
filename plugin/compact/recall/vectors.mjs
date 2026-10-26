@@ -103,8 +103,12 @@ export function takeEmbedSlot(recallRoot, slots = EMBED_SLOTS, pid = process.pid
   return null;
 }
 
-/** What READY records; an install made before 4.9.2 (no revision) or for another runtime is not ready and installs again. */
-export const readyStamp = () => ({ model: MODEL, revision: MODEL_REVISION, runtime: TRANSFORMERS });
+/**
+ * What READY records; an install made before 4.9.2 (no revision) or for another runtime is not ready and installs again.
+ * `prune` keeps only this platform's onnxruntime binary, so a runtime directory copied to another platform or CPU
+ * architecture (a synced home, a moved disk) is not ready either and installs again.
+ */
+export const readyStamp = () => ({ model: MODEL, revision: MODEL_REVISION, runtime: TRANSFORMERS, platform: process.platform, arch: process.arch });
 
 export function runtimeReady(dir) {
   try {

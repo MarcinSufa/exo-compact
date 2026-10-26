@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from '../compact.js';
 import { reconcile } from '../core/extractor.js';
-import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS, cpuMsAsync } from './fixtures/helpers.js';
+import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, LEGACY_OPTIONS, cpuMsAsync, passHarden } from './fixtures/helpers.js';
+import { SCRUBBED_ENV } from '../host/node-run.js';
 import type { CompactEvent, SessionMessage } from '../core/types.js';
 import type { FakeHost } from './fixtures/helpers.js';
 import { makeFsCaptureStore } from '../host/fs-adapter.js';
@@ -284,7 +285,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
     const segment = '/project/.exovault/s4-capture/session-default/segment-000001.json';
     files.set(segment, `${JSON.stringify({ kind: 'work_event', origin: 'turn', producedBy: 's4-capture', sourceHash: 'bad', body: { type: 'clone' } })}\n`);
     const log = vi.fn();
-    const $ = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: () => { throw new Error('sync probe failure'); }, uiLog: log });
+    const $ = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: (argv) => { if (String(argv[1]).endsWith('/harden.mjs')) return Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }); throw new Error('sync probe failure'); }, uiLog: log });
     const next = vi.fn(async () => ({ fallback: true }) as unknown);
     const result = (await withStrippedRuntimeGlobals(() => harness({ denseNotes: false })['session.compact']($, { trigger: 'auto', messages: bulkyToolConversation() }, next))) as { messages?: SessionMessage[] };
     expect(next).not.toHaveBeenCalled();
@@ -303,7 +304,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
       fsWrite: async (path, text) => { files.set(path, text); },
       fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })),
       fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path),
-      processRun,
+      processRun: passHarden(processRun),
       uiLog: log,
     });
     const handlers = harness({ denseNotes: false });
@@ -364,7 +365,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
       fsWrite: async (path, text) => { files.set(path, text); },
       fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })),
       fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path),
-      processRun,
+      processRun: passHarden(processRun),
       uiLog: log,
     });
     const handlers = harness({ denseNotes: false });
@@ -377,7 +378,7 @@ describe('compact.ts: work state at the cut (S4q)', () => {
     expect(log).toHaveBeenCalledWith('seed.work_state_probe=timeout');
 
     const disabledRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    const disabledHost = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: disabledRun });
+    const disabledHost = fakeHost({ fsRead: async (path) => path === FLAG_PATH ? '1' : files.get(path) ?? '', fsWrite: async (path, text) => { files.set(path, text); }, fsList: async (path = '') => [...files.entries()].filter(([name]) => name.startsWith(`${path}/`)).map(([name, text]) => ({ name: name.slice(path.length + 1), kind: 'file', size: text.length })), fsExists: async (path) => path === '/project' || path.endsWith(FLAG_PATH) || files.has(path), processRun: passHarden(disabledRun) });
     const disabled = harness({ workState: false });
     const disabledResult = (await withStrippedRuntimeGlobals(() => disabled['session.compact'](disabledHost, { trigger: 'auto', messages }, next))) as { messages?: SessionMessage[] };
     expect(disabledRun).not.toHaveBeenCalled();
@@ -1084,6 +1085,7 @@ it('plugin manifest declares each compact option with the matching option type',
     interactiveOnly: 'boolean',
     notices: 'string',
     recallPluginRoot: 'string',
+    nodePath: 'string',
     timeoutMs: 'number',
     retentionDays: 'number',
     contract: 'string',
@@ -1172,7 +1174,7 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     const result = (await withStrippedRuntimeGlobals(() => handlers['session.compact']($, event, next))) as { messages?: SessionMessage[] };
     expect(launches(processRun)).toHaveLength(1);
     expect(launches(processRun)[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'vectors', 'cut', '30']);
-    expect(launches(processRun)[0][1]).toEqual({ timeoutMs: 5000 });
+    expect(launches(processRun)[0][1]).toEqual({ timeoutMs: 5000, env: SCRUBBED_ENV });
     expect(result.messages?.[0].text).toContain('search_session tool (server recall) using session "session-default"');
     expect(result.messages?.[0].text).not.toContain('recall.mjs');
   });
@@ -1228,18 +1230,21 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
 
     const engineRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: engineRun, envGet: hostileEnv, pluginRoot: '/plugins/exo-compact/' }));
-    expect(engineRun.mock.calls[0][0][1]).toBe('/plugins/exo-compact/recall/launch.mjs');
+    expect(launches(engineRun)[0][0][1]).toBe('/plugins/exo-compact/recall/launch.mjs');
 
     const optionRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: optionRun, envGet: hostileEnv }));
-    expect(optionRun.mock.calls[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
+    await cut({ recallPluginRoot: '/explicit/plugin' }, fakeHost({ fsExists, processRun: optionRun, envGet: hostileEnv, pluginRoot: '' }));
+    expect(launches(optionRun)[0][0][1]).toBe('/explicit/plugin/recall/launch.mjs');
 
     for (const unsafe of ['relative/plugin', '/opt/../tmp/evil', '']) {
       const log = vi.fn();
       const run = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
-      await cut({ recallPluginRoot: unsafe }, fakeHost({ fsExists, processRun: run, uiLog: log, envGet: hostileEnv }));
+      next.mockClear();
+      await cut({ recallPluginRoot: unsafe }, fakeHost({ fsExists, processRun: run, uiLog: log, envGet: hostileEnv, pluginRoot: '' }));
       expect(run, unsafe).not.toHaveBeenCalled();
-      expect(log).toHaveBeenCalledWith('recall.build_started=0 reason=no_plugin_root');
+      // 4.9.2 review (S5u): with no trusted plugin root harden.mjs cannot run, so no capture store is verified and the cut
+      // is native: nothing is written and no script starts.
+      expect(next, unsafe).toHaveBeenCalledTimes(1);
     }
   });
 

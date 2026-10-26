@@ -23,6 +23,24 @@ Security release from a pre-launch audit. See `SECURITY.md` for the policy and h
   install from an earlier version installs again once.
 - The Windows named pipe of the recall push server carries 128 random bits in its name.
 - New `SECURITY.md`: private vulnerability reporting, data the plugin keeps, hardening and known limits (Windows ACLs).
+- Fixes from a cross-vendor security review of this release:
+  - Node scripts the hook starts can no longer be redirected by a project's `env` block (S5w). `NODE_OPTIONS`,
+    `NODE_PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES` and similar variables are cleared for every child, and the Node
+    binary comes from the new `nodePath` option, which `install.sh` and `install.ps1` set to the Node that ran them
+    (without it, `node` from `PATH`). The brief digest starts `claude` only from `~/.local/bin` or next to its own
+    Node, never from `PATH`.
+  - The capture store fails closed (S5u). `harden.mjs` exits 2 when `.exovault`, `s4-capture` or the session directory
+    is a symbolic link, not a directory owned by the user, or not 0700 afterwards, and the hook then writes nothing
+    there: a repository that commits `.exovault/s4-capture` as a link into its checkout no longer gets the held brief
+    or capture segments written through it. The check is awaited before the first write under every newly chosen root,
+    also after the working directory changes during a session, and only a success is cached.
+  - Seed integrity (S5v): `## [Constraints](#)`, `## <b>Constraints</b>` and similar link or inline-HTML wrappings of a
+    seed section name are demoted too, and a wrapper tag hidden with zero-width or combining characters
+    (`</session-\u200Bmemory>`) is neutralized.
+  - The vectors runtime's `READY` stamp records the platform and CPU architecture, so a runtime directory moved to
+    another one installs again instead of loading binaries `prune` removed.
+  - `SECURITY.md` states that everything stays local in the default configuration and names the two opt-in features
+    that send data to Jev, `jevEnabled` and `ruleCheck`.
 
 ## 4.9.1 - 2026-10-25
 

@@ -40,6 +40,12 @@
       "description": "Absolute directory of this plugin, used only when Claude Code does not report the plugin directory itself. A relative path or one with .. is ignored. The CLAUDE_PLUGIN_ROOT variable is not read.",
       "default": ""
     },
+    "nodePath": {
+      "type": "string",
+      "title": "Node.js binary",
+      "description": "Absolute path of the Node.js the plugin runs its own scripts with. The installers record the one that ran them; empty or missing falls back to node on PATH. A relative path or one with .. is ignored.",
+      "default": ""
+    },
     "interactiveOnly": {
       "type": "boolean",
       "title": "Interactive sessions only",

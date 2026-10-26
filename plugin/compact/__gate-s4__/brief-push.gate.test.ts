@@ -156,7 +156,8 @@ function host(state: string | null, stdout = FOUND) {
     },
     env: { get: async (name: string) => (name === 'HOME' ? '/home/u' : undefined) },
     clock: { now: async () => 0, after: () => ({ cancel: () => {} }) },
-    process: { run: async (argv: string[], init?: { stdin?: string }) => { runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; } },
+    // 4.9.2 review: the capture guard's harden.mjs run is not recorded.
+    process: { run: async (argv: string[], init?: { stdin?: string }) => { if (String(argv[1]).endsWith('/harden.mjs')) return { exitCode: 0, stdout: '', stderr: '' }; runs.push({ argv, stdin: init?.stdin }); return { exitCode: 0, stdout, stderr: '' }; } },
     ui: { log: (line: string) => { logs.push(line); } },
   };
 }
