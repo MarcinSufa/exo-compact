@@ -46,7 +46,7 @@ const POLISH_CUE_LINES: Record<string, Array<[number, number]>> = {
   'plugin/compact/__gate-s4__/review-r1-fixes.gate.test.ts': [[26, 27], [29, 30]],
   'plugin/compact/__gate-s4__/state-updates.gate.test.ts': [[18, 19]],
   'plugin/compact/core/adopted.ts': [[20, 20], [22, 22], [24, 25]],
-  'plugin/compact/core/constraints.ts': [[18, 18], [25, 25], [109, 109], [152, 152]],
+  'plugin/compact/core/constraints.ts': [[19, 19], [26, 26], [110, 110], [153, 153]],
   'plugin/compact/core/dense.ts': [[19, 20]],
   'plugin/compact/core/key-facts.ts': [[51, 51], [69, 69], [203, 203]],
   'plugin/compact/core/labels.ts': [[51, 51], [55, 55]],

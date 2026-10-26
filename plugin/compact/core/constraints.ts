@@ -1,3 +1,4 @@
+import { userAuthoredText } from './extractor.js';
 import type { CaptureRecord, Hasher, SessionMessage, TokenCounter } from './types.js';
 
 /**
@@ -347,8 +348,12 @@ export function extractConstraints(
 export function extractAdoptedFileConstraints(messages: readonly SessionMessage[], hash: Hasher): Constraint[] {
   const adopted = new Set<string>();
   for (const message of messages) {
-    if (message.role !== 'user' || !/\b(read|look at|open)\b[\s\S]{0,100}\b(remember|follow|use as instructions|treat as rules|obey)\b/i.test(message.text)) continue;
-    const paths = message.text.match(/(?:\.\.?\/|\/)[\w./-]+|[\w.-]+\.(?:md|txt|rst)/g) ?? [];
+    // 4.9.2: only what the user typed adopts a file. Text Claude Code adds to a user message (a <system-reminder> with
+    // a project's CLAUDE.md or a hook's output) is not the user's, and could otherwise name a file whose rule-like
+    // sentences would then land in Constraints.
+    const own = message.role === 'user' ? userAuthoredText(message.text) : '';
+    if (!/\b(read|look at|open)\b[\s\S]{0,100}\b(remember|follow|use as instructions|treat as rules|obey)\b/i.test(own)) continue;
+    const paths = own.match(/(?:\.\.?\/|\/)[\w./-]+|[\w.-]+\.(?:md|txt|rst)/g) ?? [];
     for (const path of paths) adopted.add(path.replaceAll('\\', '/'));
   }
   if (adopted.size === 0) return [];
