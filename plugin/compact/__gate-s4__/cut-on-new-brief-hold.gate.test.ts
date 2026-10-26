@@ -14,10 +14,11 @@ const longBrief = (label: string): string => `${label}\n\n${Array.from({ length:
 const history = (): SessionMessage[] => [humanPrompt('Previous task\nrequirement'), assistantText('Work completed.')];
 
 /** compactErrors: the messages the next compact() calls reject with, in order; afterwards compact resolves. */
-function harness(opts: { compactErrors: (string | 'forever')[]; fillResult?: { isFilled: boolean } | 'reject'; submitReject?: boolean; surfaces?: string[]; noRoot?: boolean; writeThrows?: boolean; sleep?: (ms: number) => Promise<void> }) {
+function harness(opts: { compactErrors: (string | 'forever')[]; fillResult?: { isFilled: boolean } | 'reject'; submitReject?: boolean; surfaces?: string[]; noRoot?: boolean; writeThrows?: boolean; sleep?: (ms: number) => Promise<void>; pluginRoot?: string }) {
   const on: Record<string, Handler> = {};
   register(((name: string, fn: Handler) => { on[name] = fn; return { catch: (caught: unknown) => { (on as Record<string, unknown>)[name + '.catch'] = caught; } }; }) as never, { ...LEGACY_OPTIONS, notices: 'all', cutOnNewBrief: true, taskCard: false, workState: false, workStateProbe: false, recallEnabled: false, adoptedFiles: false, timeoutMs: 30000 } as never);
   const logs: string[] = [];
+  const runs: string[][] = [];
   const files = new Map<string, string>();
   const queue = [...opts.compactErrors];
   const compact = vi.fn(async () => {
@@ -41,6 +42,8 @@ function harness(opts: { compactErrors: (string | 'forever')[]; fillResult?: { i
     fsRead: async (path) => { if (path === FLAG_PATH) return '1'; const t = files.get(path); if (t !== undefined) return t; throw new Error('ENOENT'); },
     fsWrite: async (path, text) => { if (opts.writeThrows) throw new Error('disk\nfull'); files.set(path, text); },
     uiLog: (line) => logs.push(line),
+    pluginRoot: opts.pluginRoot,
+    processRun: async (argv) => { runs.push(argv); return { exitCode: 0, stdout: '', stderr: '' }; },
   });
   const host = {
     ...base,
@@ -48,7 +51,7 @@ function harness(opts: { compactErrors: (string | 'forever')[]; fillResult?: { i
     prompt: { fill, submit },
     session: { ...base.session, surfaces: async () => opts.surfaces ?? ['terminal'] },
   };
-  return { on, host, logs, files, compact, fill, submit, toast };
+  return { on, host, logs, files, compact, fill, submit, toast, runs };
 }
 
 async function submitPrompt(h: ReturnType<typeof harness>, text: string, extra: Record<string, unknown> = {}) {
@@ -71,6 +74,21 @@ describe('4.6.0 (S5g) cutOnNewBrief hold and return', () => {
     expect(h.fill).toHaveBeenCalledWith({ text: brief });
     expect(h.logs).toContain('compact.trigger=new_brief');
     expect(h.logs).toContain('compact.brief_returned=fill');
+  });
+
+  it('4.9.2 (S5u): deletes the verbatim held brief once it is back in the prompt box (fill or submit), keeps it when lost', async () => {
+    const removals = (h: ReturnType<typeof harness>) => h.runs.filter((argv) => argv[1] === '/plugins/exo-compact/harden.mjs' && argv.includes('--remove'));
+    const filled = harness({ compactErrors: [TURN_RUNNING], pluginRoot: '/plugins/exo-compact' });
+    await submitPrompt(filled, longBrief('Task 2'));
+    expect(removals(filled)).toEqual([['node', '/plugins/exo-compact/harden.mjs', '/tmp/project', '/tmp/project/.exovault/s4-capture/s1', '--remove', 'held-brief.md']]);
+    const submitted = harness({ compactErrors: [TURN_RUNNING], fillResult: { isFilled: false }, pluginRoot: '/plugins/exo-compact' });
+    await submitPrompt(submitted, longBrief('Task 2'));
+    expect(submitted.logs).toContain('compact.brief_returned=submit');
+    expect(removals(submitted)).toHaveLength(1);
+    const lost = harness({ compactErrors: [TURN_RUNNING], fillResult: 'reject', submitReject: true, pluginRoot: '/plugins/exo-compact' });
+    await submitPrompt(lost, longBrief('Task 2'));
+    expect(lost.logs).toContain('compact.brief_returned=lost');
+    expect(removals(lost)).toEqual([]);
   });
 
   it('lets the returned brief through unchanged on the next submit without cutting again', async () => {

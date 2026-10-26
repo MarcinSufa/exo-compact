@@ -540,7 +540,7 @@ function writeBackup(file, entries, home) {
     [...groups].forEach(([base, names], i) => {
       const list = path.join(temp, `list-${i}.txt`);
       // NUL-separated (GNU tar and bsdtar both read --null), so a newline in a name cannot split it.
-      fs.writeFileSync(list, `${names.join('\0')}\0`);
+      fs.writeFileSync(list, `${names.join('\0')}\0`, { mode: 0o600 });
       args.push('-C', base, '--null', '-T', list);
     });
     fs.writeFileSync(file, '', { mode: 0o600 });

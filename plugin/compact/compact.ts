@@ -3,7 +3,7 @@ import { checkBudget, estimateTokens, SINCE_CARD_BUDGET_TOKENS, SINCE_CARD_KEEP,
 import { extractStateUpdates, renderStateUpdates } from './core/state-updates.js';
 import { applyConstraintOverflow, extractAdoptedFileConstraints, extractConstraints, renderConstraintsSection } from './core/constraints.js';
 import { demoteHeadings } from './core/seed.js';
-import { cleanCapturedRecord, contentIdentity, isSecretLikePath, reconcile, redactCapturedText, WATERMARK_SEQUENCE_LENGTH } from './core/extractor.js';
+import { cleanCapturedRecord, contentIdentity, isSecretLikePath, reconcile, redactCapturedText, redactHostPath, WATERMARK_SEQUENCE_LENGTH } from './core/extractor.js';
 import { applyForceTriggerOverride, forceTriggerOverride, routeTrigger, withFallback, withTimeout } from './core/handler.js';
 import { briefText, condenseUserHistory, historyOmittedNote } from './core/history.js';
 import { ADOPTED_BUDGET_TOKENS, ADOPTED_MAX_CHARS, addAdopted, adoptedFileRefs, parseAdoptedIndex, renderAdoptedFiles, resolveAdoptedPath, revokedAdopted, revokedNames } from './core/adopted.js';
@@ -48,6 +48,7 @@ import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent 
 import type { WorkStateProbe } from './core/work-state.js';
 import { runPreflight } from './host/preflight.js';
 import { trustedPluginRoot } from './host/plugin-root.js';
+import { hardenCapture } from './host/capture-mode.js';
 import { renderSessionMap } from './core/session-map.js';
 import type { SessionSegment } from './core/session-map.js';
 
@@ -122,6 +123,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
    * the same for every session in this process, so one flag is enough; the warning is drawn once per session id.
    */
   const preflight = { inert: false, checked: new Set<string>() };
+  /** 4.9.2: capture roots whose store this process already set to 0700 at session start. */
+  const securedRoots = new Set<string>();
   on('session.start', async ($, input, next) => {
     try {
       let sessionId = 'unknown';
@@ -139,6 +142,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch {
       // The preflight may only make the plugin quieter; a failure here leaves it as it was.
     }
+    // 4.9.2 (CONTRACT S5u): the store is 0700 before this session writes its first capture (host/capture-mode.ts).
+    try {
+      const homeDir = () => resolveHomeDir({ home: () => $.env.get('HOME'), userProfile: () => $.env.get('USERPROFILE'), homeDrive: () => $.env.get('HOMEDRIVE'), homePath: () => $.env.get('HOMEPATH') });
+      const captureRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert });
+      if (captureRoot !== null && !securedRoots.has(captureRoot)) {
+        securedRoots.add(captureRoot);
+        await hardenCapture({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { timeoutMs: number }) => $.process.run(argv, init) }, captureRoot);
+      }
+    } catch { /* best effort: the turn and cut writes harden the session directory again */ }
     return next(input);
   });
   // 4.9.0: every gating hook (prompt.submit, session.compact, classic.PreToolUse, classic.PostToolUse, classic.Stop)
@@ -188,18 +200,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
           if (insideTurn(message) && input.attachments !== undefined) holdSkipped = `attachments:${input.attachments.map((a) => a.type ?? '?').join(',') || input.attachments.length}`;
           if (insideTurn(message) && input.attachments === undefined) {
             let heldPath: string | undefined;
+            let heldRoot: string | undefined;
             try {
               if ((await $.session.surfaces()).length === 0) { headless = true; notice('compact.trigger_skipped=headless'); }
               else {
                 const captureRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert });
                 if (captureRoot !== null) {
                   heldPath = `${capturePath(String(await $.session.id()), captureRoot)}/held-brief.md`;
+                  heldRoot = captureRoot;
                   await $.fs.write(heldPath, unwrapPastes(input.text));
                 } else holdSkipped = 'no_capture_root';
               }
             } catch (holdError) { heldPath = undefined; holdSkipped = `hold_error:${clean(holdError instanceof Error ? holdError.message : String(holdError))}`; }
             if (heldPath !== undefined) {
-              const text = unwrapPastes(input.text), path = heldPath;
+              const text = unwrapPastes(input.text), path = heldPath, root = heldRoot;
+              // 4.9.2 (CONTRACT S5u): the held brief is the one verbatim, unredacted copy of a prompt; once it is back in the
+              // prompt box it is deleted. A lost brief keeps it (0600) so the user can recover it.
+              const dropHeld = () => { if (root !== undefined) void hardenCapture({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { timeoutMs: number }) => $.process.run(argv, init) }, root, path.slice(0, -'/held-brief.md'.length), 'held-brief.md'); };
               briefReturned = true;
               void (async () => {
                 const signal = new AbortController().signal;
@@ -222,9 +239,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
                 }
                 let filled = false;
                 try { filled = (await $.prompt.fill({ text })).isFilled; } catch { filled = false; }
-                if (filled) { notice('compact.brief_returned=fill'); return; }
+                if (filled) { notice('compact.brief_returned=fill'); dropHeld(); return; }
                 // A plugin's own submit skips this plugin's hooks, so it never consumes the flag.
-                try { await $.prompt.submit({ text }); briefReturned = false; notice('compact.brief_returned=submit'); }
+                try { await $.prompt.submit({ text }); briefReturned = false; notice('compact.brief_returned=submit'); dropHeld(); }
                 catch {
                   notice('compact.brief_returned=lost');
                   try { $.ui.toast(`exo-compact: could not return your brief; it is saved in ${path}`); } catch { /* best effort */ }
@@ -515,7 +532,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
           // forwarded elsewhere, per the hook compiler's spelling rule (CONTRACT.md, dollar-
           // spelling gate).
           const yieldTick = async (): Promise<void> => { await $.clock.sleep(0, { signal }); };
-          const hostCwd = String(await $.session.cwd());
+          // 4.9.2: redacted where it is written, not only where the seed reads it back (cleanCapturedRecord).
+          const hostCwd = redactHostPath(String(await $.session.cwd()));
           const extracted = reconcile(event.messages, await store.loadWatermark(), { hash: sha256, toolOutputNotes: toolOutputNotesEnabled });
           const previousCwd = await latestCwdSnapshot(fsLike, baseDir);
           if (previousCwd?.path !== hostCwd) extracted.records.push({ kind: 'work_event', origin: 'reconcile', producedBy: 's4-capture', sourceHash: `cwd:${sha256(`${previousCwd?.sourceHash ?? 'root'}:${hostCwd}`)}`, body: { type: 'cwd_snapshot', path: hostCwd } });
@@ -1436,6 +1454,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (briefPushArmed) {
         try { await $.fs.write(`${baseDir}/${BRIEF_PUSH_FILE}`, BRIEF_PUSH_ARMED); notice('brief_push.armed=1'); } catch { notice('brief_push.armed=0'); }
       }
+      // 4.9.2 (CONTRACT S5u): owner-only modes for what the cut wrote. Not awaited.
+      void hardenCapture({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { timeoutMs: number }) => $.process.run(argv, init) }, captureRoot, baseDir);
       await notice.summary(formatCutSummary(tokensBefore, result.tokensAfter ?? tokensBefore, Number(await $.clock.now()) - cutStartedAt)).catch(() => undefined);
       return { messages: result.messages ?? [], tokensBefore, tokensAfter: result.tokensAfter };
     } catch (error) {
@@ -1492,7 +1512,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const store = makeFsCaptureStore(fsLike, capturePath(String(await $.session.id()), captureRoot));
           const baseDir = capturePath(String(await $.session.id()), captureRoot);
           const watermark = await store.loadWatermark();
-          const hostCwd = String(await $.session.cwd());
+          // 4.9.2: redacted where it is written, not only where the seed reads it back (cleanCapturedRecord).
+          const hostCwd = redactHostPath(String(await $.session.cwd()));
           const captured = reconcile(await $.session.messages() as unknown as SessionMessage[], watermark, { hash: sha256, toolOutputNotes: optionBoolean(options, 'toolOutputNotes', true) });
           const previousCwd = await latestCwdSnapshot(fsLike, baseDir);
           if (previousCwd?.path !== hostCwd) captured.records.push({ kind: 'work_event', origin: 'turn', producedBy: 's4-capture', sourceHash: `cwd:${sha256(`${previousCwd?.sourceHash ?? 'root'}:${hostCwd}`)}`, body: { type: 'cwd_snapshot', path: hostCwd } });
@@ -1512,6 +1533,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
           await store.appendRecords(captured.records.map((record) => ({ ...record, origin: 'turn' as const })), captured.watermark, signal);
           // 4.8.1: once a capture landed, its directory gets .exovault/.gitignore (one check per root per process).
           if (!gitignoredRoots.has(captureRoot) && !signal.aborted) { gitignoredRoots.add(captureRoot); await ensureCaptureGitignore(fsLike, captureRoot); }
+          // 4.9.2 (CONTRACT S5u): owner-only modes for what this turn wrote. Not awaited, like every process the hook starts.
+          if (!signal.aborted) void hardenCapture({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: (argv: string[], init: { timeoutMs: number }) => $.process.run(argv, init) }, captureRoot, baseDir);
         },
         timeoutMs: optionNumber(options, 'timeoutMs', 30000),
         sleep: (ms, signal) => $.clock.sleep(ms, { signal }),
@@ -1924,7 +1947,9 @@ async function refreshTaskCard(host: TaskCardHost): Promise<void> {
       };
       void Promise.resolve().then(() => host.fork(renderCardPrompt(current, briefPath)))
         .then(async (reply) => {
-          const card = 'text' in reply ? parseCardReply(reply.text, estimateTokens) : undefined;
+          const parsed = 'text' in reply ? parseCardReply(reply.text, estimateTokens) : undefined;
+          // 4.9.2: the fork sees the whole context and can copy a key into the card, so the card is redacted before it is written.
+          const card = parsed === undefined ? undefined : redactCapturedText(parsed);
           if (card) {
             await host.write(cardPath, `${card}\n`);
             await host.write(`${baseDir}/${TASK_CARD_BRIEF_FILE}`, newestBrief?.id ?? '');

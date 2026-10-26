@@ -119,13 +119,13 @@ export async function ensureRuntime(dir, log = () => {}) {
     try { if (Date.now() - fs.statSync(lock).mtimeMs < 20 * 60 * 1000) return false; fs.unlinkSync(lock); return ensureRuntime(dir, log); } catch { return false; }
   }
   try {
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true, type: 'module' }), { mode: 0o600 });
     const npm = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--omit=dev', TRANSFORMERS], { cwd: dir, stdio: 'ignore', timeout: 15 * 60 * 1000, shell: process.platform === 'win32' });
     if (npm.status !== 0) throw new Error(`npm install exited ${npm.status ?? npm.signal ?? npm.error?.code}`);
     prune(dir);
     const embed = await loadEmbedder(dir, { download: true });
     await embed([`${QUERY}ok`]);
-    fs.writeFileSync(path.join(dir, 'READY'), JSON.stringify({ model: MODEL, runtime: TRANSFORMERS, at: new Date().toISOString() }));
+    fs.writeFileSync(path.join(dir, 'READY'), JSON.stringify({ model: MODEL, runtime: TRANSFORMERS, at: new Date().toISOString() }), { mode: 0o600 });
     try { fs.unlinkSync(failed); } catch {}
     log('runtime installed');
     return true;

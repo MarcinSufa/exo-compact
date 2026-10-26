@@ -1158,6 +1158,9 @@ it('registers the S4a compaction hook and the soft trigger in their own separate
   expect(triggerHooks.modules).toEqual(['../trigger.ts']);
 });
 
+/** 4.9.2: the recall launcher's runs, without the harden.mjs runs (host/capture-mode.ts) the same hooks start. */
+const launches = (run: { mock: { calls: unknown[][] } }) => run.mock.calls.filter((call) => String((call[0] as string[])[1]).endsWith('/recall/launch.mjs')) as [string[], unknown][];
+
 describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
   it('recallEnabled starts only the detached launcher and points the seed at the MCP recall tool', async () => {
     const processRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
@@ -1167,9 +1170,9 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
     const event: CompactEvent = { trigger: 'auto', messages: bulkyToolConversation() };
     const result = (await withStrippedRuntimeGlobals(() => handlers['session.compact']($, event, next))) as { messages?: SessionMessage[] };
-    expect(processRun).toHaveBeenCalledTimes(1);
-    expect(processRun.mock.calls[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'vectors', 'cut', '30']);
-    expect(processRun.mock.calls[0][1]).toEqual({ timeoutMs: 5000 });
+    expect(launches(processRun)).toHaveLength(1);
+    expect(launches(processRun)[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'vectors', 'cut', '30']);
+    expect(launches(processRun)[0][1]).toEqual({ timeoutMs: 5000 });
     expect(result.messages?.[0].text).toContain('search_session tool (server recall) using session "session-default"');
     expect(result.messages?.[0].text).not.toContain('recall.mjs');
   });
@@ -1181,11 +1184,11 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     const pluginRoot = '/plugins/exo-compact';
     const $ = fakeHost({ fsExists, processRun, envGet, pluginRoot });
     await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, recallVectors: false })['turn.complete']($, { reason: 'answer' }, async () => ({})));
-    expect(processRun).toHaveBeenCalledTimes(1);
-    expect(processRun.mock.calls[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'lexical', 'turn', '30']);
+    expect(launches(processRun)).toHaveLength(1);
+    expect(launches(processRun)[0][0]).toEqual(['node', '/plugins/exo-compact/recall/launch.mjs', expect.stringContaining('/.claude/projects/'), '/home/u/.claude/exovault/recall', 'session-default', 'lexical', 'turn', '30']);
     const processRunOff = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     await withStrippedRuntimeGlobals(() => harness({})['turn.complete'](fakeHost({ fsExists, processRun: processRunOff, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
-    expect(processRunOff).not.toHaveBeenCalled();
+    expect(launches(processRunOff)).toHaveLength(0);
   });
 
   it('retentionDays reaches the launcher at a cut and after an answer; 0 turns retention off', async () => {
@@ -1195,10 +1198,10 @@ describe('compact.ts: S4d transcript pointer wiring (spec §3.1.2)', () => {
     const cutRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     const next = vi.fn(async () => ({ fellBack: true }) as unknown);
     await withStrippedRuntimeGlobals(() => harness({ contract: 'the contract', recallEnabled: true, workStateProbe: false, retentionDays: 0 })['session.compact'](fakeHost({ fsExists, processRun: cutRun, envGet, pluginRoot }), { trigger: 'auto', messages: bulkyToolConversation() } as CompactEvent, next));
-    expect(cutRun.mock.calls[0][0].slice(-2)).toEqual(['cut', '0']);
+    expect(launches(cutRun)[0][0].slice(-2)).toEqual(['cut', '0']);
     const turnRun = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
     await withStrippedRuntimeGlobals(() => harness({ recallEnabled: true, retentionDays: 7 })['turn.complete'](fakeHost({ fsExists, processRun: turnRun, envGet, pluginRoot }), { reason: 'answer' }, async () => ({})));
-    expect(turnRun.mock.calls[0][0].slice(-2)).toEqual(['turn', '7']);
+    expect(launches(turnRun)[0][0].slice(-2)).toEqual(['turn', '7']);
   });
 
   it('turn capture writes .exovault/.gitignore next to the captures, once per root', async () => {
