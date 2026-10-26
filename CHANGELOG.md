@@ -2,6 +2,13 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## Unreleased
+
+- First installs no longer print Git's detached-HEAD advice (#75).
+- README: a new lead (0.4 s instead of 62 s, no model call), a three-step "How it works" (capture, deterministic
+  rebuild, recall with `search_session`) and a new how-it-works graphic. `docs/assets/social-preview.png` is the
+  1280x640 repository preview image.
+
 ## 4.9.1 - 2026-10-25
 
 - The compact and dense timing gates measure CPU time instead of wall time, so server load no longer fails them (#68).

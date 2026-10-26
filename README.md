@@ -12,6 +12,14 @@
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.278-8A2BE2">
 </p>
 
+<h3 align="center">Deterministic compaction for Claude Code.<br>0.4 s instead of 62 s. No model call to compact.</h3>
+
+<p align="center">
+  The context is rebuilt from records, not summarized. Your rules come back word for word, the task
+  card keeps the goal and the next step, and the whole session stays searchable on your machine.
+  Keep one session working for days.
+</p>
+
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#how-it-compares">Comparison</a> ·
@@ -197,17 +205,35 @@ it rebuilds the context from those records, with no model call.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
-    <img alt="How it works, in three steps. 1, while you work: exo-compact saves your rules (quoted word for word), a task card (goal, done, next step), your long requests in full, the work state (files, branch, running jobs) and a search index of the whole session, all on your machine. 2, the window fills: in about a second and with no model call, 218k tokens become 45k. The new context has the sections Constraints, Task card, Task brief, Work state, Session map, Working notes and File pointers, followed by the latest messages. 3, afterwards: the agent carries on with the same task, the same rules and its place in the work, and the search_session tool looks up any earlier detail in the saved session at about 900 tokens per lookup." src="docs/assets/how-it-works-light.png" width="880">
+    <img alt="How it works: rebuilt from records, not summarized. No model call, and your rules survive every cut word for word. 01 Capture, while you work: saved on your machine as the session runs, keys redacted: your rules word for word, a task card (goal, done, next step), your long requests in full, the work state (files, branch, jobs) and a search index of the whole session. 02 Deterministic rebuild, when the window fills: no model call, built the same way every time, 218k tokens become 45k in 0.4 s, with the sections Constraints, Task card, Task brief, Work state, Session map, Working notes and File pointers, plus the latest messages. 03 Recall, afterwards: the agent carries on with the same task, the same rules and its place in the work; the search_session tool looks up any earlier detail in the saved session at about 900 tokens per lookup, with BM25 and local vectors that run on your machine. Median pause per compaction: native 62 s, exo-compact 0.4 s. It falls back to native compaction if anything fails." src="docs/assets/how-it-works-light.png" width="880">
   </picture>
 </p>
 
-Native compaction hands the agent a summary written by the model. exo-compact hands it a
-structured context that is built the same way every time:
+Native compaction asks the model to write a summary of the conversation: a pause of about a minute,
+and your rules come back paraphrased. exo-compact does not summarize. It rebuilds the context from
+records it keeps while you work, in three steps.
+
+### 01 Capture: while you work
+
+As the session runs, exo-compact saves on your machine, with keys redacted:
+
+- your standing rules and adopted rules files, word for word;
+- a task card with the goal, the rules, what is done and the next step, kept current in the
+  background by the session's own model;
+- your newest long request, in full;
+- the work state: cwd, branch, uncommitted files, worktrees, tasks and background jobs;
+- a search index of the whole session.
+
+### 02 Deterministic rebuild: when the window fills
+
+No model call. The new context is built from those records the same way every time, in 0.4 s at
+the median (native compaction: 62 s). A typical cut takes the context from 218k tokens to 45k:
 
 ```
 ## Constraints        your standing rules and adopted rules files, quoted verbatim
 ## Task card          goal, rules, done, next step: kept current by the session's own model
-## Task brief         your newest long request, verbatim, plus a checklist
+## Task brief         where your long requests are saved, so the agent can read them in full;
+                      with taskCard=false, the newest one verbatim (up to 24,000 characters) or its checklist
 ## Work state         cwd, branch, uncommitted files, worktrees, tasks, background jobs
 ## Session map        one line per earlier stretch of the session: asks, files edited, commits
 ## Working notes      exact values, ids and command output lines from before the compaction
@@ -215,9 +241,16 @@ structured context that is built the same way every time:
 ... followed by the most recent messages, verbatim
 ```
 
+If anything fails, the session falls back to native compaction.
+
+### 03 Recall: `search_session` afterwards
+
 Whatever does not fit is not thrown away. The agent has a `search_session` tool that searches
-the whole earlier session on your machine and returns short excerpts, so it can find an old
-decision or an exact value without loading the history back into its context.
+the whole earlier session on your machine and returns short excerpts, at about 900 tokens per
+lookup, so it can find an old decision or an exact value without loading the history back into its
+context. Search combines BM25 with optional local vectors that run on your CPU. By default nothing
+from the saved session leaves your machine; only the opt-in Jev features (`jevEnabled`,
+`ruleCheck`, both off by default) send text to TypeSafe.
 
 [docs/how-it-works.md](docs/how-it-works.md) explains each step.
 
