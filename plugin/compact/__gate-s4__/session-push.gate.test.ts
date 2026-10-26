@@ -6,9 +6,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_PUSH_FILE, parseSessionPush, renderSessionPush } from '../core/session-push.js';
+import { SESSION_PUSH_FILE, parsePushPointer, parseSessionPush, renderSessionPush } from '../core/session-push.js';
 import { SESSION_PUSH_MAX_CHARS, sessionPush } from '../recall/session-push.mjs';
-import { PUSH_POINTER, PUSH_STATE_FILE, startPushServer } from '../recall/push-server.mjs';
+import { PUSH_POINTER, PUSH_STATE_FILE, socketPath, startPushServer } from '../recall/push-server.mjs';
 import { generationKey, readPublished } from '../recall/recall.mjs';
 import { prepare, terms } from '../recall/rank.mjs';
 import { hash } from '../recall/shared.mjs';
@@ -290,6 +290,21 @@ function post(socketPath: string, body: unknown, headers: Record<string, string>
     req.end(JSON.stringify(body));
   });
 }
+
+describe('4.9.2: a Windows pipe name cannot be guessed', () => {
+  it('carries 128 random bits after the session prefix and pid, and the hook still accepts it', () => {
+    const names = [1, 2].map(() => socketPath({ platform: 'win32', prefix: '0123456789abcdef', instance: 4242 }));
+    for (const name of names) {
+      expect(name).toMatch(/^\\\\\.\\pipe\\exo-recall-0123456789abcdef-4242-[0-9a-f]{32}$/);
+      expect(parsePushPointer(JSON.stringify({ socket: name, token: 't' }))?.socket).toBe(name);
+    }
+    expect(names[0]).not.toBe(names[1]);
+  });
+
+  it('keeps the short Unix socket name in its owner-only directory', () => {
+    expect(socketPath({ platform: 'linux', socketDir: '/tmp/exo-recall-1', prefix: 'abc', instance: 7 })).toBe(path.join('/tmp/exo-recall-1', 'abc-7.sock'));
+  });
+});
 
 const socketDir = () => { const dir = mkdtempSync(path.join(os.tmpdir(), 'sp-')); chmodSync(dir, 0o700); return dir; };
 

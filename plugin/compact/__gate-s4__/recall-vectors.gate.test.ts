@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import { hash } from '../recall/shared.mjs';
 import { recallSession, sessionHasVectors } from '../recall/recall.mjs';
 import { handleMessageAsync, recallTool } from '../recall/mcp-server.mjs';
-import { DIM, EMBED_SLOTS, appendVectors, nearest, readVectors, storedKeys, takeEmbedSlot, textKey, vectorFile } from '../recall/vectors.mjs';
+import { DIM, EMBED_SLOTS, MODEL_REVISION, TRANSFORMERS, appendVectors, ensureRuntime, nearest, readVectors, readyStamp, runtimeReady, storedKeys, takeEmbedSlot, textKey, vectorFile } from '../recall/vectors.mjs';
 
 /** A unit vector along one axis, so cosines are 1 for the same axis and 0 otherwise. */
 const axis = (k: number) => { const v = new Float32Array(DIM); v[k] = 1; return v; };
@@ -144,5 +144,60 @@ describe('recall index refreshed after every answer', () => {
       appendFileSync(transcript, line(`last ${'more filler '.repeat(3000)}`)); build('turn');
       expect(recallTool({ around: fresh, session }, { recallRoot: root, transcript }).hits[0].text).toContain('KST-48213');
     } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+});
+
+describe('4.9.2: the vectors runtime is pinned and installs without scripts', () => {
+  const lock = JSON.parse(readFileSync(fileURLToPath(new URL('../recall/runtime-lock.json', import.meta.url)), 'utf8'));
+
+  it('the shipped lock pins transformers exactly and holds an npm registry integrity hash for every package', () => {
+    expect(lock.lockfileVersion).toBe(3);
+    expect(lock.packages[''].dependencies).toEqual({ '@huggingface/transformers': TRANSFORMERS.split('@').pop() });
+    const entries = Object.entries(lock.packages).filter(([key]) => key !== '') as [string, { integrity?: string; resolved?: string }][];
+    expect(entries.length).toBeGreaterThan(10);
+    for (const [key, entry] of entries) {
+      expect(entry.integrity, key).toMatch(/^sha512-/);
+      expect(entry.resolved, key).toMatch(/^https:\/\/registry\.npmjs\.org\//);
+    }
+  });
+
+  it('the model is pinned to a hub commit', () => {
+    expect(MODEL_REVISION).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('READY from before 4.9.2, for another runtime or unreadable is not ready', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'exo-ready-'));
+    try {
+      expect(runtimeReady(dir)).toBe(false);
+      for (const text of ['{}', 'not json', JSON.stringify({ model: readyStamp().model, runtime: TRANSFORMERS }), JSON.stringify({ ...readyStamp(), revision: 'main' })]) {
+        writeFileSync(path.join(dir, 'READY'), text);
+        expect(runtimeReady(dir), text).toBe(false);
+      }
+      writeFileSync(path.join(dir, 'READY'), JSON.stringify({ ...readyStamp(), at: 'x' }));
+      expect(runtimeReady(dir)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform === 'win32')('installs with npm ci --ignore-scripts from the shipped lock', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'exo-runtime-'));
+    const bin = mkdtempSync(path.join(os.tmpdir(), 'exo-fake-npm-'));
+    const argsFile = path.join(bin, 'args');
+    writeFileSync(path.join(bin, 'npm'), `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nexit 7\n`, { mode: 0o700 });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+    try {
+      const runtime = path.join(dir, 'recall-runtime');
+      expect(await ensureRuntime(runtime)).toBe(false);
+      expect(readFileSync(argsFile, 'utf8').trim().split('\n')).toEqual(['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--omit=dev']);
+      expect(JSON.parse(readFileSync(path.join(runtime, 'package-lock.json'), 'utf8'))).toEqual(lock);
+      expect(JSON.parse(readFileSync(path.join(runtime, 'package.json'), 'utf8')).dependencies).toEqual(lock.packages[''].dependencies);
+      expect(readFileSync(path.join(runtime, 'FAILED'), 'utf8')).toMatch(/npm ci exited 7/);
+      expect(existsSync(path.join(runtime, 'READY'))).toBe(false);
+      for (const name of ['package.json', 'package-lock.json', 'FAILED']) expect(statSync(path.join(runtime, name)).mode & 0o777, name).toBe(0o600);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 });
