@@ -232,7 +232,8 @@ the median (native compaction: 62 s). A typical cut takes the context from 218k 
 ```
 ## Constraints        your standing rules and adopted rules files, quoted verbatim
 ## Task card          goal, rules, done, next step: kept current by the session's own model
-## Task brief         your newest long request, verbatim, plus a checklist
+## Task brief         where your long requests are saved, so the agent can read them in full;
+                      with taskCard=false, the newest one verbatim (up to 24,000 characters) or its checklist
 ## Work state         cwd, branch, uncommitted files, worktrees, tasks, background jobs
 ## Session map        one line per earlier stretch of the session: asks, files edited, commits
 ## Working notes      exact values, ids and command output lines from before the compaction
@@ -247,7 +248,9 @@ If anything fails, the session falls back to native compaction.
 Whatever does not fit is not thrown away. The agent has a `search_session` tool that searches
 the whole earlier session on your machine and returns short excerpts, at about 900 tokens per
 lookup, so it can find an old decision or an exact value without loading the history back into its
-context. Search combines BM25 with optional local vectors that run on your CPU.
+context. Search combines BM25 with optional local vectors that run on your CPU. By default nothing
+from the saved session leaves your machine; only the opt-in Jev features (`jevEnabled`,
+`ruleCheck`, both off by default) send text to TypeSafe.
 
 [docs/how-it-works.md](docs/how-it-works.md) explains each step.
 
