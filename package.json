@@ -25,9 +25,9 @@
     "status": "node tools/status.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.15.3",
-    "typescript": "5.9.3",
-    "vitest": "4.1.12"
+    "@types/node": "^26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
   },
   "engines": {
     "node": ">=22.15"
