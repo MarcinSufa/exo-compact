@@ -2,6 +2,13 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## Unreleased
+
+- Dev dependencies: vitest 4.0.18 -> 4.1.12 (vite 7 -> 8), which clears the vitest and vite advisories `npm audit`
+  reported (GHSA-5xrq-8626-4rwp and others). They affect only the test run, not the installed plugin, which ships no
+  npm runtime dependencies.
+- `.github/dependabot.yml`: weekly update PRs for the dev dependencies and the GitHub Actions.
+
 ## 4.9.2 - 2026-10-26
 
 Security release from a pre-launch audit. See `SECURITY.md` for the policy and how to report a vulnerability.
