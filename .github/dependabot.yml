@@ -11,6 +11,13 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # The static gates need the JavaScript compiler API, which TypeScript 7 does not ship.
+      - dependency-name: typescript
+        versions: [">= 7"]
+      # Keep Node types on the minimum supported Node major.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
