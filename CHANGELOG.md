@@ -4,6 +4,9 @@ Notable changes per version. `plugin/compact/CONTRACT.md` has the full behaviour
 
 ## Unreleased
 
+- Dev dependencies: vitest 4.1.12 -> 5.0.5; TypeScript stays on 5.9.3 because TypeScript 7 does not ship the
+  JavaScript compiler API used by the static source gates; `@types/node` stays on the Node 22 major; Dependabot now
+  ignores TypeScript 7 and `@types/node` major updates.
 - Dev dependencies: vitest 4.0.18 -> 4.1.12 (vite 7 -> 8), which clears the vitest and vite advisories `npm audit`
   reported (GHSA-5xrq-8626-4rwp and others). They affect only the test run, not the installed plugin, which ships no
   npm runtime dependencies.
