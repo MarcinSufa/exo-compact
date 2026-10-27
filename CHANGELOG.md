@@ -2,7 +2,7 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
-## Unreleased
+## 4.9.2 - 2026-10-27
 
 - First installs no longer print Git's detached-HEAD advice (#75).
 - README: a new lead (0.4 s instead of 62 s, no model call), a three-step "How it works" (capture, deterministic
