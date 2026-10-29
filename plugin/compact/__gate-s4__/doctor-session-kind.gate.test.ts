@@ -289,3 +289,70 @@ describe('doctor exit code ignores the new checks', () => {
     expect(check(r.result, 'interactive-only').status).toBe('warn');
   });
 });
+
+describe('doctor auto-compact (S5x)', () => {
+  const user = `${HOME}/.claude/settings.json`;
+  const project = `${CWD}/.claude/settings.json`;
+  const legacy = `${HOME}/.claude.json`;
+  const json = (value: unknown) => JSON.stringify(value);
+  const doctorFor = (files: Record<string, string>, env: Record<string, string | undefined> = {}) => run({ cwd: CWD, home: HOME, env, ...io({ files }) });
+
+  it('is ok at 200000 or below with auto-compact on, and names where the window comes from', async () => {
+    const r = await doctorFor({ [user]: json({ autoCompactWindow: 200000 }) });
+    const row = check(r.result, 'auto-compact');
+    expect(row.status).toBe('ok');
+    expect(row.message).toContain('200000');
+    expect(folded(row.message)).toContain(user);
+    expect(r.code).toBe(0);
+  });
+
+  it('reads a settings file that starts with a byte order mark', async () => {
+    const row = check((await doctorFor({ [user]: `\uFEFF${json({ autoCompactWindow: 200000 })}`, [legacy]: `\uFEFF${json({ autoCompactEnabled: true })}` })).result, 'auto-compact');
+    expect(row.status).toBe('ok');
+    expect(row.message).not.toMatch(/not valid JSON/);
+  });
+
+  it('warns when the window is unset, with the fix', async () => {
+    const row = check((await doctorFor({})).result, 'auto-compact');
+    expect(row.status).toBe('warn');
+    expect(row.message).toMatch(/model default/);
+    expect(folded(row.message)).toContain(`"autoCompactWindow": 200000 in ${user}`);
+  });
+
+  it('warns above 200000; a project file beats the user file', async () => {
+    const row = check((await doctorFor({ [user]: json({ autoCompactWindow: 150000 }), [project]: json({ autoCompactWindow: 500000 }) })).result, 'auto-compact');
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain('500000');
+  });
+
+  it('the environment variable wins over the settings', async () => {
+    const over = check((await doctorFor({ [user]: json({ autoCompactWindow: 200000 }) }, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '900000' })).result, 'auto-compact');
+    expect(over.status).toBe('warn');
+    expect(over.message).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000');
+    const under = check((await doctorFor({}, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '180000' })).result, 'auto-compact');
+    expect(under.status).toBe('ok');
+  });
+
+  it('warns when auto-compact is off: environment first, then settings, then the legacy config', async () => {
+    const window = { [user]: json({ autoCompactWindow: 200000 }) };
+    const byEnv = check((await doctorFor({ [user]: json({ autoCompactWindow: 200000, autoCompactEnabled: true }) }, { DISABLE_COMPACT: '1' })).result, 'auto-compact');
+    expect(byEnv.status).toBe('warn');
+    expect(byEnv.message).toContain('DISABLE_COMPACT');
+    const bySettings = check((await doctorFor({ [user]: json({ autoCompactWindow: 200000, autoCompactEnabled: false }), [legacy]: json({ autoCompactEnabled: true }) })).result, 'auto-compact');
+    expect(bySettings.status).toBe('warn');
+    expect(bySettings.message).toMatch(/off/);
+    const byLegacy = check((await doctorFor({ ...window, [legacy]: json({ autoCompactEnabled: false, primaryApiKey: 'sk-legacy-canary' }) })).result, 'auto-compact');
+    expect(byLegacy.status).toBe('warn');
+    expect(byLegacy.message).not.toContain('sk-legacy-canary');
+    const settingsWin = check((await doctorFor({ [user]: json({ autoCompactWindow: 200000, autoCompactEnabled: true }), [legacy]: json({ autoCompactEnabled: false }) })).result, 'auto-compact');
+    expect(settingsWin.status).toBe('ok');
+  });
+
+  it('never fails the doctor, and is left out of --preflight (no cwd)', async () => {
+    const broken = await doctorFor({ [user]: '{ not json' });
+    expect(check(broken.result, 'auto-compact').status).toBe('warn');
+    expect(broken.code).toBe(0);
+    const preflight = await run({ cwd: undefined });
+    expect(preflight.result.checks.some((item: Check) => item.id === 'auto-compact')).toBe(false);
+  });
+});

@@ -2,8 +2,18 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
-## Unreleased
+## 4.10.0 - 2026-10-29
 
+- The plugin sets Claude Code's auto-compact window and turns auto-compact on (S5x). Two new options come first in
+  the manifest: `autoCompactWindow` (default 200000, what the A/B tests ran with; 0 leaves the setting alone) and
+  `autoCompact` (default true). At the first attended session start, `auto-compact.mjs` writes them to the user
+  `settings.json` (other keys kept, atomic write, a broken file left alone, a concurrent change planned again, a
+  byte order mark kept; the hook passes the config dir it resolved, so a project `env` block cannot redirect it) and the change shows as one notice line,
+  also in `notices: "quiet"`. A marker in `<config dir>/exovault/auto-compact.json` records the applied values, so a
+  later change by hand stays. `install.sh` and `install.ps1` ask both questions on a terminal (or read
+  `EXO_COMPACT_WINDOW` / `EXO_COMPACT_AUTO`), pass the answers as `--config` and apply them right away.
+  `setup.cjs doctor` reports the effective window and whether auto-compact is on, and warns when it is off, unset or
+  above 200000.
 - Dev dependencies: vitest 4.1.12 -> 5.0.5; TypeScript stays on 5.9.3 because TypeScript 7 does not ship the
   JavaScript compiler API used by the static source gates; `@types/node` stays on the Node 22 major; Dependabot now
   ignores TypeScript 7 and `@types/node` major updates.

@@ -131,6 +131,11 @@ describe('shipped defaults', () => {
     expect(manifest.userConfig.briefPush.default).toBe(false);
     expect(manifest.userConfig.briefCheck.default).toBe(false);
   });
+  it('S5x: the auto-compact window (200000) and auto-compact on come first', () => {
+    expect(Object.keys(manifest.userConfig).slice(0, 2)).toEqual(['autoCompactWindow', 'autoCompact']);
+    expect(manifest.userConfig.autoCompactWindow).toMatchObject({ type: 'number', default: 200000, title: 'Auto-compact window (tokens)' });
+    expect(manifest.userConfig.autoCompact).toMatchObject({ type: 'boolean', default: true, title: 'Turn on auto-compact' });
+  });
 });
 
 describe('doctor --versions', () => {

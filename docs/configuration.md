@@ -14,6 +14,8 @@ With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-comp
 
 | Option | Type | Default | Description |
 |---|---|---|---|
+| `autoCompactWindow` | number | `200000` | exo-compact sets Claude Code's autoCompactWindow in your user settings to this at session start, so a session compacts at this size instead of when a 1M window fills. 200000 is what the A/B tests ran with; Claude Code accepts 100000-1000000; 0 leaves your setting alone. |
+| `autoCompact` | boolean | `true` | Turns Claude Code's auto-compact on in your user settings at session start, so exo-compact runs when the window fills. false leaves your setting alone. |
 | `recallEnabled` | boolean | `true` | Build and query a local, session-scoped history index. |
 | `retentionDays` | number | `30` | Delete the recall index and the capture directory of a session untouched for this many days (checked at most once a day by the recall build worker; captures under a project's own .exovault are left alone). 30 matches Claude Code's default for keeping transcripts; 0 keeps everything. `node setup.cjs cleanup` runs the same retention by hand, with a dry run and a backup. |
 | `recallPluginRoot` | string | `""` | Absolute directory of this plugin, used only when Claude Code does not report the plugin directory itself. A relative path or one with .. is ignored. The CLAUDE_PLUGIN_ROOT variable is not read. |
@@ -76,6 +78,8 @@ With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-comp
 | Variable | Used by | Meaning |
 |---|---|---|
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | Claude Code | Not needed: the plugin loads without it on every supported version (checked on 2.1.278, 2.1.284 and 2.1.292). The launchers still set it. |
-| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Claude Code | Auto-compact window in tokens (`S4_WINDOW` in the launcher). |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Claude Code | Auto-compact window in tokens (`S4_WINDOW` in the launcher). Wins over the `autoCompactWindow` setting; the session-start step and `setup.cjs doctor` say so when it is set. |
+| `DISABLE_AUTO_COMPACT`, `DISABLE_COMPACT` | Claude Code | Either one keeps auto-compact off whatever the settings say, so exo-compact never runs; the session-start step and `setup.cjs doctor` say so. |
+| `EXO_COMPACT_WINDOW`, `EXO_COMPACT_AUTO` | `install.sh`, `install.ps1` | Answer the two auto-compact questions without a prompt: a window in tokens (100000 to 1000000, 0 leaves the setting alone) and 1 or 0. See [install.md](install.md). |
 | `TYPESAFE_API_KEY` | Jev features | TypeSafe API key; needed only for `ruleCheck` / `jevEnabled`. `setup.cjs doctor` warns when one of them is on and the key is missing, rejected or out of credit. |
 | `S4_WINDOW`, `S4_JEV=1`, `S4_SKIP_DOCTOR=1` | `launch/exo-compact.sh` | Window, Jev ranking on, skip preflight (`-Window`, `-Jev`, `-SkipDoctor` in PowerShell). |

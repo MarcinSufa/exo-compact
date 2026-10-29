@@ -47,6 +47,7 @@ import { buildDenseJevRequests, denseJevQuery, parseDenseJevAnswers } from './co
 import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent } from './core/work-state.js';
 import type { WorkStateProbe } from './core/work-state.js';
 import { runPreflight } from './host/preflight.js';
+import { runAutoCompact } from './host/auto-compact.js';
 import { trustedPluginRoot } from './host/plugin-root.js';
 import { hardenCaptureSession, makeCaptureGuard } from './host/capture-mode.js';
 import { nodeRunner, type NodeRunInit } from './host/node-run.js';
@@ -126,9 +127,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
    * the same for every session in this process, so one flag is enough; the warning is drawn once per session id.
    */
   const preflight = { inert: false, checked: new Set<string>() };
+  /** 4.10.0 (CONTRACT S5x): auto-compact.mjs ran in this process (host/auto-compact.ts). */
+  let autoCompactChecked = false;
   /** 4.9.2 review (CONTRACT S5u): store and session directories this process hardened and verified (host/capture-mode.ts). */
   const captureGuard = makeCaptureGuard();
   on('session.start', async ($, input, next) => {
+    const homeDir = () => resolveHomeDir({ home: () => $.env.get('HOME'), userProfile: () => $.env.get('USERPROFILE'), homeDrive: () => $.env.get('HOMEDRIVE'), homePath: () => $.env.get('HOMEPATH') });
+    const secureRoot = async (root: string) => captureGuard.secure({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)) }, root, capturePath(String(await $.session.id()), root));
     try {
       let sessionId = 'unknown';
       try { sessionId = String(await $.session.id()); } catch { /* the id is not bound yet */ }
@@ -148,10 +153,26 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // 4.9.2 (CONTRACT S5u): the store and this session's directory are hardened and verified before the first capture
     // write; the lookup's `secure` does it, and every later lookup that leads to a write checks again (host/capture-flag.ts).
     try {
-      const homeDir = () => resolveHomeDir({ home: () => $.env.get('HOME'), userProfile: () => $.env.get('USERPROFILE'), homeDrive: () => $.env.get('HOMEDRIVE'), homePath: () => $.env.get('HOMEPATH') });
-      const secureRoot = async (root: string) => captureGuard.secure({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)) }, root, capturePath(String(await $.session.id()), root));
       await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot });
     } catch { /* a root that fails here is checked again before any write under it */ }
+    // 4.10.0 (CONTRACT S5x): once per process, in an attended session of a plugin that is not inert, set Claude Code's
+    // auto-compact window and turn auto-compact on; the lines say what changed and show in quiet mode (host/notices.ts).
+    try {
+      const attended = () => attendedSession({ surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD') });
+      if (!autoCompactChecked && !preflight.inert && await attended()) {
+        autoCompactChecked = true;
+        const notice = noticeLog({ emit: (...args: [string, { to: 'debug' }?]) => $.ui.log(...args), surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD'), logFile: async () => { const noticeRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot }); return noticeRoot === null ? undefined : `${capturePath(String(await $.session.id()), noticeRoot)}/notices.log`; }, read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), now: () => $.clock.now() });
+        const lines = await runAutoCompact({
+          pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')),
+          run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)),
+          window: optionNumber(options, 'autoCompactWindow', 200000),
+          enabled: optionBoolean(options, 'autoCompact', true),
+          home: homeDir,
+          configDir: async () => $.env.get('CLAUDE_CONFIG_DIR'),
+        });
+        for (const line of lines) notice(line);
+      }
+    } catch { /* this step may only tell the user what it changed; it never holds up a session start */ }
     return next(input);
   });
   // 4.9.0: every gating hook (prompt.submit, session.compact, classic.PreToolUse, classic.PostToolUse, classic.Stop)
