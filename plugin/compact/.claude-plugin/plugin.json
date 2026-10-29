@@ -18,9 +18,10 @@
   "userConfig": {
     "autoCompactWindow": {
       "type": "number",
-      "title": "Auto-compact window (tokens)",
+      "title": "Auto-compact window (tokens, default 200000)",
       "description": "exo-compact sets Claude Code's autoCompactWindow in your user settings to this at session start, so a session compacts at this size instead of when a 1M window fills. 200000 is what the A/B tests ran with; Claude Code accepts 100000-1000000; 0 leaves your setting alone.",
-      "default": 200000
+      "default": 200000,
+      "max": 1000000
     },
     "autoCompact": {
       "type": "boolean",
