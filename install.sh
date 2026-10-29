@@ -45,7 +45,7 @@ ask() {
 # /dev/null: with curl | bash, stdin is this script.
 main() {
   local repo="${EXO_COMPACT_REPO:-https://github.com/MarcinSufa/exo-compact.git}"
-  local ref="${EXO_COMPACT_REF:-v4.10.0}"
+  local ref="${EXO_COMPACT_REF:-v4.10.1}"
   local dir="${EXO_COMPACT_HOME:-$HOME/.exo-compact}"
   local enable_dir="${EXO_COMPACT_ENABLE_DIR:-}"
   local plugin="$dir/plugin/compact"
