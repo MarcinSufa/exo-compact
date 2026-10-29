@@ -567,7 +567,7 @@ function digestMain(argv, pluginRoot) {
     return 1;
   }
   const where = 'Managed settings name it under extraKnownMarketplaces["exo-compact"].pluginDigests["exo-compact"]';
-  const lines = [result.digest, `exo-compact digest: ${folder}, ${result.files} files. ${where} (${BYPASS_SECTION}).`, ...result.notes.map((note) => `exo-compact digest: note: ${note}.`)];
+  const lines = [result.digest, `exo-compact digest: ${folder}, ${result.files} files. ${where} (${BYPASS_SECTION}).`];
   process.stdout.write(`${lines.join('\n')}\n`);
   return 0;
 }

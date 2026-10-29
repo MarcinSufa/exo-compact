@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { derivedTranscriptPath } from '../host/transcript-path.js';
 // @ts-expect-error plain ESM module without types
 import { findBypass, pluginDigest } from '../bypass.mjs';
@@ -15,7 +15,9 @@ import { findBypass, pluginDigest } from '../bypass.mjs';
 import * as doctor from '../doctor.mjs';
 import { claudeProjectDir } from '../recall/paths.mjs';
 
-type Found = { by: string; events: string[]; file: string };
+const TYPES_PROBLEM = '.claude-plugin/types/ is in the folder: Claude Code writes it there when it loads the plugin from a folder the person owns, so this digest would not match the release; digest a fresh LF clone of the release tag instead (README, "Hooks skipped by another plugin")';
+
+type Found ={ by: string; events: string[]; file: string };
 type Check = { id: string; status: string; message: string };
 
 const pluginRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -72,6 +74,30 @@ describe('S5y the skip line in the project transcripts', () => {
     expect(findBypass(path.join(base, 'file'))).toEqual([]);
     mkdirSync(path.join(base, 'empty'));
     expect(findBypass(path.join(base, 'empty'))).toEqual([]);
+  });
+
+  it('a person who pastes the line, as text or inside a task notification, is not Claude Code reporting it', () => {
+    const line = 'exo-compact: its classic.Stop hook was skipped. "cc-plugin-sec-default" runs first and sent the event on past it.';
+    const m = machine();
+    write(path.join(m.project, 's1.jsonl'), [
+      { type: 'user', message: { role: 'user', content: `why does it say ${line}` } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: `<task-notification>\n${line}\n</task-notification>` }] }, isMeta: true },
+      { type: 'system', content: line },
+    ].map((record) => JSON.stringify(record)).join('\n'));
+    expect(findBypass(m.project)).toEqual([]);
+  });
+
+  it('only lines that hold the skip text are parsed as JSON', () => {
+    const m = machine();
+    const other = JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } });
+    write(path.join(m.project, 's1.jsonl'), `${Array(500).fill(other).join('\n')}\n${readFileSync(FIXTURE, 'utf8')}`);
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      expect(findBypass(m.project)).toHaveLength(1);
+      expect(parse).toHaveBeenCalledTimes(7);
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   it.each([
@@ -177,7 +203,7 @@ const LAYOUT: [string, Buffer][] = [
 describe('S5y the pluginDigests digest', () => {
   it('matches the byte layout: UTF-16 path order, decimal byte length, root-only exclusions', () => {
     const result = pluginDigest(pluginFolder());
-    expect(result).toEqual({ digest: expectedDigest(LAYOUT), files: LAYOUT.length, notes: [] });
+    expect(result).toEqual({ digest: expectedDigest(LAYOUT), files: LAYOUT.length });
     expect(result.digest).toBe('sha256-2+p/Wz102t4lOKxiR2tH59I+6EdybR/TzeXm9rq7ejQ=');
   });
 
@@ -194,12 +220,13 @@ describe('S5y the pluginDigests digest', () => {
     expect(pluginDigest(dir)).toEqual({ problem: 'hooks/win.ts has CRLF line endings (a checkout that converted them), so its digest would not match a copy with the published bytes' });
   });
 
-  it('files Claude Code writes into a folder it loads (.claude-plugin/types) are counted and named in a note', () => {
+  it('a folder Claude Code has loaded from a folder the person owns (.claude-plugin/types): no digest, a fresh clone named', () => {
     const dir = pluginFolder();
     write(path.join(dir, '.claude-plugin', 'types', 'p', 'index.d.ts'), 'export {};\n');
-    const result = pluginDigest(dir);
-    expect(result.files).toBe(LAYOUT.length + 1);
-    expect(result.notes).toEqual(['.claude-plugin/types/ is in the folder and in the digest: Claude Code writes it when it loads a plugin from a folder you own, so a fresh copy has another digest']);
+    expect(pluginDigest(dir)).toEqual({ problem: TYPES_PROBLEM });
+    const ran = spawnSync(process.execPath, [DOCTOR, 'digest', dir], { encoding: 'utf8', env: baseEnv() });
+    expect(ran.status).toBe(1);
+    expect(ran.stdout).toBe(`exo-compact digest: no digest for ${dir}: ${TYPES_PROBLEM}.\n`);
   });
 
   it('a missing folder is a problem, not a throw', () => {
@@ -229,8 +256,12 @@ describe('S5y the pluginDigests digest', () => {
     expect(refused.stdout).toBe(`exo-compact digest: no digest for ${dir}: mod.ts has CRLF line endings (a checkout that converted them), so its digest would not match a copy with the published bytes.\n`);
   });
 
-  it('the shipped plugin folder is one Claude Code can digest: no links, no CRLF', () => {
-    const result = pluginDigest(pluginRoot);
+  it('the shipped plugin folder, as git tracks it, is one Claude Code can digest: no links, no CRLF', () => {
+    const shipped = temp();
+    const tracked = spawnSync('git', ['ls-files', '-z', '.'], { cwd: pluginRoot, encoding: 'utf8' }).stdout.split('\0').filter(Boolean);
+    expect(tracked).toContain('.claude-plugin/plugin.json');
+    for (const name of tracked) write(path.join(shipped, name), readFileSync(path.join(pluginRoot, name)));
+    const result = pluginDigest(shipped);
     expect(result.problem).toBeUndefined();
     expect(result.digest).toMatch(/^sha256-[A-Za-z0-9+/]{43}=$/);
   });

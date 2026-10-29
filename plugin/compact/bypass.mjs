@@ -10,7 +10,7 @@ const NEWEST = 3;
 // ponytail: only the first 16 MiB of each transcript is read; a skip line after that is missed. The line comes with
 // the first skipped event, so the head is where it is.
 const MAX_BYTES = 16 * 1024 * 1024;
-const QUOTE = String.raw`(?:\\"|"|&quot;)`;
+const QUOTE = '(?:"|&quot;)';
 const SKIP_LINE = new RegExp(String.raw`exo-compact: its ([A-Za-z0-9._-]+) hook was skipped\. ${QUOTE}([A-Za-z0-9._@:/-]+)${QUOTE} runs first and sent the event on past it\.`, 'g');
 
 function head(file) {
@@ -24,14 +24,14 @@ function head(file) {
   }
 }
 
-/** A line Claude Code wrote, not one quoted by the model or printed by a tool. */
-function fromClaudeCode(line) {
-  try {
-    const record = JSON.parse(line);
-    return record?.type !== 'assistant' && record?.toolUseResult === undefined;
-  } catch {
-    return false;
-  }
+/** The text of a notice Claude Code queued itself (a queue operation or a queued command), not one a person or the model wrote. */
+function queuedNotice(line) {
+  let record;
+  try { record = JSON.parse(line); } catch { return undefined; }
+  const text = record?.type === 'queue-operation' ? record.content
+    : record?.type === 'attachment' && record.attachment?.type === 'queued_command' ? record.attachment.prompt
+      : undefined;
+  return typeof text === 'string' ? text : undefined;
 }
 
 /**
@@ -54,8 +54,8 @@ export function findBypass(projectDir) {
     let text;
     try { text = head(file); } catch { continue; }
     for (const line of text.split('\n')) {
-      if (!line.includes('hook was skipped') || !fromClaudeCode(line)) continue;
-      for (const [, event, by] of line.matchAll(SKIP_LINE)) {
+      if (!line.includes('hook was skipped')) continue;
+      for (const [, event, by] of queuedNotice(line)?.matchAll(SKIP_LINE) ?? []) {
         const entry = found.get(by) ?? { by, events: [], file };
         if (!entry.events.includes(event)) entry.events.push(event);
         found.set(by, entry);
@@ -76,8 +76,8 @@ const crlfText = (bytes) => !bytes.includes(0) && bytes.includes('\r\n');
 /**
  * The pluginDigests entry for a plugin folder, as Claude Code computes it: `sha256-` and the base64 SHA-256 of, for
  * every regular file in UTF-16 code unit order of its `/` path, "f PATH" NUL decimal byte length NUL bytes.
- * `{ digest, files, notes }`, or `{ problem }` where Claude Code would refuse the folder or the digest could not match
- * the published bytes (CRLF line endings). Never throws.
+ * `{ digest, files }`, or `{ problem }` where Claude Code would refuse the folder or the digest could not match the
+ * published bytes (CRLF line endings, or `.claude-plugin/types/` Claude Code added when it loaded the folder). Never throws.
  */
 export function pluginDigest(folder) {
   const names = [];
@@ -89,6 +89,7 @@ export function pluginDigest(folder) {
         if (!Buffer.from(name, 'utf8').equals(raw)) return { problem: `a name under ${dir || 'its root'} is not UTF-8, so Claude Code would refuse this folder` };
         if (dir === '' && LEFT_OUT.has(name)) continue;
         const relative = dir === '' ? name : `${dir}/${name}`;
+        if (`${relative}/` === TYPES_DIR) return { problem: `${TYPES_DIR} is in the folder: Claude Code writes it there when it loads the plugin from a folder the person owns, so this digest would not match the release; digest a fresh LF clone of the release tag instead (README, "Hooks skipped by another plugin")` };
         const stat = fs.lstatSync(path.join(folder, relative));
         if (stat.isDirectory()) stack.push(relative);
         else if (stat.isFile()) names.push(relative);
@@ -110,8 +111,5 @@ export function pluginDigest(folder) {
     hash.update(`f ${name}\u0000${bytes.length}\u0000`);
     hash.update(bytes);
   }
-  const notes = names.some((name) => name.startsWith(TYPES_DIR))
-    ? [`${TYPES_DIR} is in the folder and in the digest: Claude Code writes it when it loads a plugin from a folder you own, so a fresh copy has another digest`]
-    : [];
-  return { digest: `sha256-${hash.digest('base64')}`, files: names.length, notes };
+  return { digest: `sha256-${hash.digest('base64')}`, files: names.length };
 }

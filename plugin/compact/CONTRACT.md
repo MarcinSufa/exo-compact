@@ -3573,8 +3573,10 @@ log only.
 **Detection (`bypass.mjs` `findBypass(projectDir)`).** `projectDir` is `claudeProjectDir(cwd)` in `recall/paths.mjs`:
 the projects dir and the cwd with every character outside `[A-Za-z0-9]` replaced by `-`, the derivation
 `host/transcript-path.ts` uses (a gate pins both). The newest 3 `.jsonl` files by mtime are read, the first 16 MiB of
-each. A line counts only when it parses as JSON, is not an `assistant` record and has no `toolUseResult` (a model quote
-or a tool output does not count); in it the skip line is matched with the quotes as `"`, `\"` or `&quot;`. Result:
+each. Only a line holding the text `hook was skipped` is parsed as JSON, and it counts only as a record Claude Code
+queues itself: `type: "queue-operation"` (its `content`) or `type: "attachment"` with `attachment.type:
+"queued_command"` (its `prompt`); user, assistant and tool records do not count, so a person or the model quoting the
+line is no hit. In that text the skip line is matched with the quotes as `"` or `&quot;`. Result:
 `[{by, events, file}]`, one per plugin, events in the order seen; a missing dir or a read error is `[]`, never a throw.
 
 **Doctor.** Check `bypass` (session checks only, after `auto-compact`): per plugin found, one `warn` naming it, the
@@ -3589,11 +3591,12 @@ folder, at the root only leave out `.git`, `.claude-plugin-link`, `.in_use`, `.l
 every regular file by its `/` path, sorted by UTF-16 code units; sha256 over, per file, `f <path>` NUL `<byte length>`
 NUL `<bytes>`; `sha256-` and the base64 hash. Refused with exit 1 and one line naming the cause, where Claude Code would
 refuse the folder: an entry that is neither a regular file nor a folder (a symlink or junction), a name that is not
-UTF-8, more than 4096 files, more than 32 MiB. Also refused: a text file (no NUL byte) with CRLF line endings, since a
-checkout that converted them cannot match the published bytes. Otherwise exit 0: the digest, the folder and file count,
-where managed settings name it (`extraKnownMarketplaces["exo-compact"].pluginDigests["exo-compact"]`), and a note when
-`.claude-plugin/types/` is present (Claude Code writes it into a folder the person owns; it is in the digest). exo-compact
-itself writes nothing into its plugin folder.
+UTF-8, more than 4096 files, more than 32 MiB. Also refused, because the digest could not match the release: a text
+file (no NUL byte) with CRLF line endings (a checkout that converted them), and a `.claude-plugin/types/` entry (Claude
+Code writes it each time it loads the plugin from a folder the person owns, and the digest counts it; the line says to
+digest a fresh LF clone of the release tag). Otherwise exit 0: the digest, the folder and file count, and where managed
+settings name it (`extraKnownMarketplaces["exo-compact"].pluginDigests["exo-compact"]`). exo-compact itself writes
+nothing into its plugin folder.
 
 **Auto-compact.** The hook passes `--cwd <$.session.cwd>` to `auto-compact.mjs apply` (absolute, else exit 2). With it,
 once a field is due, `findBypass` runs on that project's transcript dir; a plugin found: nothing written, no marker, one

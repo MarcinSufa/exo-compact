@@ -10,8 +10,9 @@ Notable changes per version. `plugin/compact/CONTRACT.md` has the full behaviour
   two fixes: `"appendPlugins": ["exo-compact@exo-compact"]` in the user settings, or an administrator's managed
   settings entry.
 - `setup.cjs doctor digest [folder]` prints the `pluginDigests` value managed settings need for that entry, computed
-  as Claude Code does, and refuses a folder Claude Code would refuse (a symlink, too many files) or one whose files
-  have CRLF line endings.
+  as Claude Code does, and refuses a folder Claude Code would refuse (a symlink, too many files) or one that cannot
+  match the release (CRLF line endings, or the `.claude-plugin/types/` Claude Code adds to a folder it loads); the
+  README gives the commands for a fresh LF clone of the release tag.
 - While the hooks are skipped, the session start leaves the auto-compact settings alone and says why in one line:
   a smaller window would only bring the native compaction sooner. The settings are applied after the fix.
 - README: "Hooks skipped by another plugin", how to recognize it and both fixes, with the managed settings JSON.

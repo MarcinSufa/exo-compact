@@ -569,16 +569,20 @@ digest of each release they allow:
 }
 ```
 
-The digest covers every file of the plugin folder, so each release has its own. Print it from an installed copy:
+The digest covers every file of the plugin folder, so each release has its own: compute it again for every
+release you allow, from a fresh clone of its tag with LF line endings (replace `v4.10.1` with the release):
 
 ```bash
-node ~/.exo-compact/plugin/compact/setup.cjs doctor digest          # the copy Claude Code loads here
-node ~/.exo-compact/plugin/compact/setup.cjs doctor digest <folder> # any plugin folder
+git clone --depth 1 --branch v4.10.1 --config core.autocrlf=false https://github.com/MarcinSufa/exo-compact.git exo-compact-v4.10.1
+node exo-compact-v4.10.1/plugin/compact/doctor.mjs digest exo-compact-v4.10.1/plugin/compact
 ```
 
-It refuses a folder with a symbolic link or with CRLF line endings (a checkout that converted them), because
-that digest would not match the published files. Instead of digests, the managed settings can also declare the
-marketplace as a local directory that lists the plugin by a relative path.
+The first line it prints is the value for `pluginDigests`. `node <plugin>/setup.cjs doctor digest` without a folder
+digests the copy Claude Code loads on this machine. It refuses a folder with a symbolic link, with CRLF line endings
+(a checkout that converted them) or with `.claude-plugin/types/`, because that digest would not match the release:
+Claude Code writes `.claude-plugin/types/` into a plugin folder each time it loads the plugin from a folder the
+person owns, and the digest counts it, so such a folder stops matching. Instead of digests, the managed settings
+can also declare the marketplace as a local directory that lists the plugin by a relative path.
 
 These rules are read from Claude Code 2.1.312 (its settings descriptions and the code that computes the digest),
 not tested against a live managed setup. The digest layout is pinned by a test.
