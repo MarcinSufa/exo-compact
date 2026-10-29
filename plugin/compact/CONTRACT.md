@@ -2957,8 +2957,10 @@ it is not attended (`attendedSession`, S5n: no surface and not started by the VS
 line, in order, as before. In an interactive `quiet` session only these lines are drawn: the per-cut summary
 `compacted <before> -> <after> tokens in <s> s`, and warnings, meaning lines matching `compact.fallback=`,
 `compact.error=`, `compact.trigger=new_brief`, `compact.brief_returned=`, `compact.hold_skipped=`,
-`compact.refusal_guard=`, `brief.saved=0`, `capture.timeout`, or containing `error`. Every other line is appended with an
-ISO timestamp to `<capture dir>/notices.log`, trimmed to the newest 1500 lines. The summary is not drawn headless.
+`compact.refusal_guard=`, `brief.saved=0`, `capture.timeout`, or containing `error` (4.7.5 adds `rule_check.off=`, S5x
+adds lines from the auto-compact step: `exo-compact: ` followed by text with the word `auto-compact`). Every other line is
+appended with an ISO timestamp to `<capture dir>/notices.log`, trimmed to the newest 1500 lines. The summary is not drawn
+headless.
 
 **Home directory.** `host/home-dir.ts` (hook) and `recall/paths.mjs` (node) read the same env chain: `HOME`, then
 `USERPROFILE`, then `HOMEDRIVE`+`HOMEPATH`; empty counts as unset. When none resolves, the node side (and the recall root
@@ -3476,6 +3478,86 @@ starts (`harden.mjs`, `doctor.mjs`, `recall/*.mjs`) goes through `nodeRunner` (`
 else the `claude` next to its own `process.execPath`, never from `PATH` or `CLAUDE_CODE_EXECPATH`; with neither, it
 writes the `.digest.err` file and the seed shows the brief without a checklist. Its `claude` child and its detached
 worker get `digestEnv()` / `SCRUBBED_ENV` too. Gates: capture-security, "4.9.2 review (S5w)".
+
+### S5x: the auto-compact window and auto mode at install (4.10.0)
+
+exo-compact replaces the summary only when Claude Code itself auto-compacts. On a 1M-context model Claude Code's
+default auto-compact window is the model window, so a session first compacts near 1,000,000 tokens, and with
+`autoCompactEnabled: false` it never does. The A/B results ran with `"autoCompactWindow": 200000`. The plugin therefore
+sets both, says what it set, and leaves a value the user later changes by hand alone. Facts read from the Claude Code
+2.1.284 bundle (not a live run): `autoCompactWindow` is a settings key Claude Code accepts from 100000 to 1000000, and
+env `CLAUDE_CODE_AUTO_COMPACT_WINDOW` wins over it; `autoCompactEnabled` resolves through the settings sources (first
+defined wins), then the legacy global config (`~/.claude.json`), then `true`; `DISABLE_AUTO_COMPACT` or
+`DISABLE_COMPACT` turns auto-compact off whatever the settings say.
+
+**Options.** `autoCompactWindow` (number, default 200000; 0 leaves the setting alone) and `autoCompact` (boolean,
+default true; false leaves the setting alone), the first two `userConfig` entries.
+
+**`auto-compact.mjs apply <window|keep> <true|false|keep> [--home <abs>] [--config-dir <abs>] [--json]`.** Paths:
+settings = `$CLAUDE_CONFIG_DIR/settings.json`, else `<home>/.claude/settings.json`; legacy =
+`$CLAUDE_CONFIG_DIR/.claude.json`, else `<home>/.claude.json` (as Claude Code resolves its global config:
+`join(configDir || homedir(), ".claude.json")`); marker = `<config dir>/exovault/auto-compact.json`, the last applied
+`{window, enabled}`. With `--home` or `--config-dir` (absolute, else exit 2) those two stand in for `<home>` and
+`$CLAUDE_CONFIG_DIR` and the process environment is not used for any path: a project settings `env` block reaches the
+hook's children (S5w scrubs only the Node loader variables), so a `CLAUDE_CONFIG_DIR` or `HOME` there must not decide
+which settings.json is written. Without either flag (the installers) the environment and `os.homedir()` decide.
+
+- Each field is compared with its marker field; a field equal to it (or `keep`) is not looked at. Both equal: nothing
+  is read beyond the marker, nothing is written or printed. A changed window option therefore does not undo an
+  auto-compact the user turned off by hand, and the reverse.
+- Window: 0 is recorded and changes nothing. Not an integer in 100000..1000000: one warning line, nothing changed or
+  recorded (so the warning repeats at the next session start). A settings window that is already a number <= the
+  requested one while no marker exists is the user's choice: recorded, not changed. Otherwise the window is written.
+- Enabled: false is recorded and changes nothing. True: the effective value is the settings key when defined, else the
+  legacy key, else true; `autoCompactEnabled: true` is written to the settings only when it is false. Only that key is
+  read from the legacy file, which holds credentials; the file is never written or printed.
+- Read: a leading UTF-8 byte order mark (Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes one) is dropped
+  before parsing, in the settings, the legacy file and the marker, and in doctor; a settings file that had one keeps
+  it when it is written.
+- Concurrent writers: just before the rename the file is read again. Bytes that differ from what was planned on: the
+  plan is made again once from the new content; different again: nothing written, no marker, one line that the file
+  changed while it was being updated, exit 1 (the next session start tries again). The gap between that last read and
+  the rename stays open (Claude Code takes no lock on the file).
+- Write: every other key kept, in order, 2-space indent and a trailing newline, to a temp file in the same directory
+  then renamed over (a symlinked settings.json keeps the link and changes its target; the file mode is kept). A
+  missing settings.json is created with its directory. A file that cannot be read, is not JSON or is not a JSON object:
+  nothing written, no marker, one line naming the file, exit 1. The marker (directory 0700, file 0600) is written only
+  after the write succeeded or a field was deliberately left.
+- After the plan: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` set while the window was due: one line that it wins, with its value.
+  `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT` set while enabled=true was due: one line that auto-compact stays off.
+- Output: the changes in one line, `exo-compact: set Claude Code's auto-compact window to 200k tokens (it was the model's
+  window); turned auto-compact on. Change it with /plugin configure exo-compact.`, then the warnings. Exit 0 done or
+  nothing to do, 1 unreadable or invalid settings (or a failed write), 2 bad arguments (nothing created).
+
+**Session start.** In `session.start`, after the preflight and the capture-root lookup, once per process, when the
+plugin is not inert and the session is attended (`attendedSession`, S5n; never `-p`, SDK or child runs), the hook runs
+`auto-compact.mjs apply <autoCompactWindow> <autoCompact> --home <home> [--config-dir <dir>]` through `nodeRunner` and
+`trustedPluginRoot` (S5t, S5w) with a 3000 ms timeout (`host/auto-compact.ts`). `<home>` is `resolveHomeDir` and
+`<dir>` is `CLAUDE_CONFIG_DIR`, both read from the hook's own `$.env`; neither resolves: no run, one line
+`exo-compact: auto-compact settings not checked (no home directory).` Each stdout line starting `exo-compact:` goes through the notice log; the
+`WARNING_LINES` pattern `^exo-compact: .*\bauto-compact\b` draws it in `notices: "quiet"` too (S5i). A non-zero exit
+without a line, a throw or a timeout is one line `exo-compact: auto-compact settings not checked (<reason>).`; the
+session start is never held up past the timeout or failed.
+
+**Installers.** `install.sh` and `install.ps1` ask two questions when the marker does not exist and a terminal is
+there (sh: stdout is a terminal and `/dev/tty` opens, read from `/dev/tty` because with `curl | bash` stdin is the
+script; ps1: `Read-Host` only when the host is interactive and input is not redirected):
+`Claude Code compacts only when the context window fills: on a 1M model that is 1,000,000 tokens. Set the auto-compact window to 200000 tokens (recommended)? [Y/n or a number]`
+(empty or y = 200000, n = 0, a number in range; anything else asks again) and
+`Turn auto-compact on, so exo-compact runs when the window fills? [Y/n]`. `EXO_COMPACT_WINDOW` (0 or 100000..1000000)
+and `EXO_COMPACT_AUTO` (1/0, true/false) answer without a prompt; another value stops the installer before it clones.
+No marker, no terminal and no env: 200000 and on. A marker and no env for a field: `keep`, no `--config` for it, so a
+value set with `/plugin configure` stays. The answers go on the install call as `--config autoCompactWindow=<n>
+--config autoCompact=<true|false>`, then `node <plugin>/auto-compact.mjs apply <n> <bool>` runs and its line is printed
+under `exo-compact <version> is installed.`
+
+**Doctor.** Check `auto-compact` (session checks only, not `--preflight`): the window from
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else the last integer `autoCompactWindow` in user, project, local settings, else
+"model default"; on/off from `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT`, else the last boolean `autoCompactEnabled` in
+those files, else the legacy key (read alone), else on. `warn` with a one-line fix when auto-compact is off, the window
+is the model default or above 200000, or a settings file is not JSON; `ok` otherwise; never `fail`. Gates:
+auto-compact, doctor-session-kind "doctor auto-compact (S5x)", notices, native-install "shipped defaults",
+`tools/install/install.test.mjs`.
 
 ### 4.9.2: pinned vectors runtime and Windows pipe name
 

@@ -1075,6 +1075,8 @@ it('plugin manifest declares each compact option with the matching option type',
     ...[...source.matchAll(/optionString\(options,\s*'([^']+)'/g)].map((match) => match[1]),
   ]);
   const types: Record<string, string> = {
+    autoCompactWindow: 'number',
+    autoCompact: 'boolean',
     recallEnabled: 'boolean',
     briefCheck: 'boolean',
     briefPush: 'boolean',

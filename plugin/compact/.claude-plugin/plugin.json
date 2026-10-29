@@ -1,6 +1,6 @@
 {
   "name": "exo-compact",
-  "version": "4.9.2",
+  "version": "4.10.0",
   "description": "Fast, deterministic context compaction for Claude Code: a seed built from captured state instead of a model summary, plus local search over the compacted history.",
   "author": {
     "name": "Marcin Sufa"
@@ -16,6 +16,19 @@
     "claude-code"
   ],
   "userConfig": {
+    "autoCompactWindow": {
+      "type": "number",
+      "title": "Auto-compact window (tokens, default 200000)",
+      "description": "exo-compact sets Claude Code's autoCompactWindow in your user settings to this at session start, so a session compacts at this size instead of when a 1M window fills. 200000 is what the A/B tests ran with; Claude Code accepts 100000-1000000; 0 leaves your setting alone.",
+      "default": 200000,
+      "max": 1000000
+    },
+    "autoCompact": {
+      "type": "boolean",
+      "title": "Turn on auto-compact",
+      "description": "Turns Claude Code's auto-compact on in your user settings at session start, so exo-compact runs when the window fills. false leaves your setting alone.",
+      "default": true
+    },
     "recallEnabled": {
       "type": "boolean",
       "title": "Enable session recall",

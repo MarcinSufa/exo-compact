@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-4.9.2-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-4.10.0-blue">
   <img alt="status" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.278-8A2BE2">
@@ -65,6 +65,13 @@ Restart Claude Code, and the next time the context fills, exo-compact handles it
 enabled, in every project, with session search on. There is nothing to build, no `npm install` and
 no flag to set. `claude -p` and SDK runs stay on native compaction. If your Node.js or Claude Code
 is too old, the session says so in one line and leaves compaction to Claude Code.
+
+**It sets Claude Code's auto-compact window to 200000 tokens.** exo-compact runs only when Claude Code
+auto-compacts, and on a 1M model that is when 1,000,000 tokens fill. At the first session start the plugin
+writes `"autoCompactWindow": 200000` (what the results below ran with) to `~/.claude/settings.json`,
+turns auto-compact on if it is off, and says so in one line. The installer script asks both questions first.
+Change either with `/plugin configure exo-compact` (`autoCompactWindow`, 0 leaves your setting alone;
+`autoCompact`); a value you later set by hand stays.
 
 **No API key is needed.** One extra is optional and off by default: the Jev rule check, which
 checks each reply against your rules through TypeSafe's Jev API and needs a TypeSafe API key.

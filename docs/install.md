@@ -63,25 +63,34 @@ On Windows, in PowerShell (untested on a real Windows machine):
 irm https://raw.githubusercontent.com/MarcinSufa/exo-compact/main/install.ps1 | iex
 ```
 
-The installer does three things:
+The installer does four things:
 
-1. Clones the repository to `~/.exo-compact`, or updates the clone that is already there.
-2. Runs the preflight check (`doctor`). On a Node.js or Claude Code that is too old it stops
+1. Asks two questions about Claude Code's auto-compact, on a terminal and only on the first install:
+   whether to set the auto-compact window to 200000 tokens (or another number; `n` leaves your setting
+   alone), and whether to turn auto-compact on. exo-compact runs only when Claude Code auto-compacts, and
+   on a 1M model that is when 1,000,000 tokens fill. Without a terminal the answers are 200000 and on.
+2. Clones the repository to `~/.exo-compact`, or updates the clone that is already there.
+3. Runs the preflight check (`doctor`). On a Node.js or Claude Code that is too old it stops
    here, before anything is registered.
-3. Registers the clone with Claude Code as a plugin and sets the plugin directory option. Session recall
-   and `interactiveOnly=true` are the manifest defaults, so they are not set again. This is the
-   [manual install](#install-by-hand) below. The plugin is on for every project; the installer writes no flag file.
+4. Registers the clone with Claude Code as a plugin and sets the plugin directory, the Node binary and the
+   two answers (`autoCompactWindow`, `autoCompact`), then writes the answers to `~/.claude/settings.json`
+   and prints what it changed. Session recall and `interactiveOnly=true` are the manifest defaults, so they
+   are not set again. This is the [manual install](#install-by-hand) below. The plugin is on for every
+   project; the installer writes no flag file.
 
 Then start `claude` as usual. A session that is already running needs a restart.
 
 Running the installer again updates the clone and the plugin. It sets only the plugin directory
-again, so the other options stay as you left them.
+and the Node binary again and asks nothing, so the other options stay as you left them; an
+`EXO_COMPACT_WINDOW` or `EXO_COMPACT_AUTO` you pass is applied again.
 
 | Variable | What it changes |
 |---|---|
 | `EXO_COMPACT_ENABLE_DIR` | Optional. A directory to also write a flag file in (`setup.cjs enable <dir>`); not needed, the plugin is on everywhere. `none` keeps it off everywhere (`setup.cjs disable ~`); use `setup.cjs enable <dir>` later. |
 | `EXO_COMPACT_HOME` | Where the clone lives. Default: `~/.exo-compact`. |
 | `EXO_COMPACT_REPO`, `EXO_COMPACT_REF` | The repository, and the tag or branch to install from. The default is the tag of the latest release (the installer on `main` names it), so a change merged to `main` is installed only once it is released; `EXO_COMPACT_REF=main` installs it before that. |
+| `EXO_COMPACT_WINDOW` | Answers the first question without a prompt: the auto-compact window in tokens, 100000 to 1000000, or `0` to leave your setting alone. Anything else stops the installer before it clones. |
+| `EXO_COMPACT_AUTO` | Answers the second question without a prompt: `1` turns auto-compact on, `0` leaves your setting alone. |
 
 ```bash
 cd ~/work/my-project

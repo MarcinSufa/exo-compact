@@ -15,7 +15,7 @@ export function noticesMode(value: unknown): NoticesMode {
   return value === 'all' ? 'all' : 'quiet';
 }
 
-/** Lines that still reach the transcript in quiet mode: fallbacks to native compaction, errors, held-brief steps, lost data, a rule check that cannot work (4.7.5). */
+/** Lines that still reach the transcript in quiet mode: fallbacks to native compaction, errors, held-brief steps, lost data, a rule check that cannot work (4.7.5), a change to the auto-compact settings (S5x). */
 const WARNING_LINES: readonly RegExp[] = [
   /^compact\.(?:fallback|error)=/,
   /^compact\.trigger=new_brief$/,
@@ -25,6 +25,8 @@ const WARNING_LINES: readonly RegExp[] = [
   /^brief\.saved=0/,
   /^capture\.timeout$/,
   /^rule_check\.off=/,
+  // 4.10.0 (CONTRACT S5x): what the session-start step changed in Claude Code's auto-compact settings.
+  /^exo-compact: .*\bauto-compact\b/,
   /error/,
 ];
 

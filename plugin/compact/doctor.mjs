@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { configPaths, withoutBom } from './auto-compact.mjs';
 import { jevEndpoint, jevOrigin, TYPESAFE_URL as DEFAULT_JEV_URL } from './recall/jev-endpoint.mjs';
 
 // Kept in step with host/jev-client.ts and core/select-j.ts by doctor.test.ts.
@@ -162,6 +163,41 @@ function settingsFiles(deps) {
   const configDir = deps.env.CLAUDE_CONFIG_DIR || path.join(deps.home, '.claude');
   return [path.join(configDir, 'settings.json'), path.join(deps.cwd, '.claude', 'settings.json'), path.join(deps.cwd, '.claude', 'settings.local.json')];
 }
+
+// 4.10.0 (CONTRACT S5x): the window and on/off Claude Code resolves; ~/.claude.json is read for autoCompactEnabled only.
+function checkAutoCompact(deps, add) {
+  const files = settingsFiles(deps);
+  const window = { value: undefined, from: 'model default' };
+  let enabled = { value: undefined, from: '' };
+  let unreadable = '';
+  for (const file of files) {
+    let text;
+    try { text = deps.readFile(file); } catch { continue; }
+    let settings;
+    try { settings = JSON.parse(withoutBom(text)); } catch { unreadable = file; continue; }
+    if (Number.isInteger(settings?.autoCompactWindow)) Object.assign(window, { value: settings.autoCompactWindow, from: file });
+    if (typeof settings?.autoCompactEnabled === 'boolean') enabled = { value: settings.autoCompactEnabled, from: file };
+  }
+  const envWindow = String(deps.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? '').trim();
+  if (envWindow !== '') Object.assign(window, { value: Number(envWindow), from: `CLAUDE_CODE_AUTO_COMPACT_WINDOW=${envWindow.slice(0, 40)}` });
+  if (enabled.value === undefined) {
+    const legacy = configPaths(deps.env, deps.home).legacy;
+    let value;
+    try { value = JSON.parse(withoutBom(deps.readFile(legacy)))?.autoCompactEnabled; } catch { value = undefined; }
+    enabled = typeof value === 'boolean' ? { value, from: legacy } : { value: true, from: 'default' };
+  }
+  const disabledBy = ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT'].find((name) => String(deps.env[name] ?? '') !== '');
+  const user = files[0];
+  const broken = unreadable ? ` (${unreadable} is not valid JSON and was skipped)` : '';
+  if (disabledBy) return add('auto-compact', 'warn', `auto-compact is off: ${disabledBy} is set, so exo-compact never runs. Fix: unset ${disabledBy}.${broken}`);
+  if (enabled.value === false) return add('auto-compact', 'warn', `auto-compact is off (${enabled.from}), so exo-compact never runs. Fix: turn Auto-compact on in /config.${broken}`);
+  if (window.value === undefined) return add('auto-compact', 'warn', `auto-compact window: model default (1,000,000 tokens on a 1M model), so a session may run far past 200000 before it compacts. Fix: set "autoCompactWindow": ${MAX_RECOMMENDED_WINDOW} in ${user}.${broken}`);
+  const fix = window.from.startsWith('CLAUDE_CODE_AUTO_COMPACT_WINDOW=') ? `unset CLAUDE_CODE_AUTO_COMPACT_WINDOW or set it to ${MAX_RECOMMENDED_WINDOW}` : `set "autoCompactWindow": ${MAX_RECOMMENDED_WINDOW} in ${window.from}`;
+  if (!(window.value <= MAX_RECOMMENDED_WINDOW)) return add('auto-compact', 'warn', `auto-compact window: ${window.value} tokens (${window.from}), above the ${MAX_RECOMMENDED_WINDOW} the A/B tests ran with. Fix: ${fix}.${broken}`);
+  add('auto-compact', broken ? 'warn' : 'ok', `auto-compact on, window ${window.value} tokens (${window.from})${broken}`);
+}
+
+const MAX_RECOMMENDED_WINDOW = 200_000;
 
 function checkNode(nodeVersion, add) {
   const node = parseVersion(nodeVersion);
@@ -379,6 +415,8 @@ export async function runDoctor(deps) {
     else if (entrypoint === 'cli' || entrypoint === 'claude-vscode') add('interactive-only', 'ok', `interactiveOnly: on, a ${entrypoint} session uses S4`);
     else if (entrypoint) add('interactive-only', 'warn', `interactiveOnly is on and CLAUDE_CODE_ENTRYPOINT=${entrypoint}: this kind of session keeps native compaction. ${INTERACTIVE_ONLY_HINT}`);
     else add('interactive-only', 'ok', `interactiveOnly: on, terminal and VS Code or Cursor extension sessions use S4; -p and SDK runs stay on native compaction. ${INTERACTIVE_ONLY_HINT}`);
+
+    checkAutoCompact(deps, add);
   }
 
   let jev = 'off';

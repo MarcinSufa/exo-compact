@@ -86,12 +86,15 @@ const runSh = (env, options = {}) => spawnSync('bash', [sh], { env, encoding: 'u
 const runPs1 = (env) => spawnSync(pwsh, ['-NoProfile', '-File', ps1], { env, encoding: 'utf8' });
 
 /**
- * The only options an install sets: the plugin directory and, since 4.9.2 (CONTRACT S5w), the absolute path of the Node
- * that ran the installer, so the hook does not start `node` from a PATH a project can change.
+ * The options an install sets: the plugin directory and, since 4.9.2 (CONTRACT S5w), the absolute path of the Node
+ * that ran the installer, so the hook does not start `node` from a PATH a project can change. 4.10.0 (CONTRACT S5x):
+ * plus the auto-compact answers in `autoCompact` (none on a run that finds them already given).
  */
-function assertInstallConfigs(install, plugin) {
+const DEFAULT_AUTO_COMPACT = { autoCompact: 'true', autoCompactWindow: '200000' };
+function assertInstallConfigs(install, plugin, autoCompact = DEFAULT_AUTO_COMPACT) {
   const configs = install.filter((_, index) => install[index - 1] === '--config');
-  assert.deepEqual(configs.map((config) => config.split('=')[0]).sort(), ['nodePath', 'recallPluginRoot']);
+  assert.deepEqual(configs.map((config) => config.split('=')[0]).sort(), [...Object.keys(autoCompact), 'nodePath', 'recallPluginRoot'].sort());
+  for (const [key, value] of Object.entries(autoCompact)) assert.ok(configs.includes(`${key}=${value}`), `--config ${key}=${value}`);
   const rootOption = configs.find((config) => config.startsWith('recallPluginRoot='));
   if (plugin !== undefined) assert.equal(path.resolve(rootOption.slice('recallPluginRoot='.length)), plugin);
   const nodePath = configs.find((config) => config.startsWith('nodePath=')).slice('nodePath='.length);
@@ -107,14 +110,72 @@ function assertFreshInstall(box, result) {
   assert.equal(path.resolve(calls[0][3]), box.clone);
   const install = calls.find((call) => call[1] === 'install');
   assert.deepEqual(install.slice(0, 3), ['plugin', 'install', 'exo-compact@exo-compact']);
-  // recallEnabled and interactiveOnly come from the manifest defaults now; only the clone path and Node are set here.
+  // recallEnabled and interactiveOnly come from the manifest defaults; the clone path, Node and the auto-compact answers are set here.
   assertInstallConfigs(install, plugin);
   assert.ok(!fs.existsSync(flag(box.home)), 'no flag file is written: installed means enabled');
   assert.ok(!fs.existsSync(optout(box.home)), 'and nothing is opted out');
   assert.match(result.stdout, /exo-compact \d+\.\d+\.\d+ is installed/);
+  // No terminal and no EXO_COMPACT_WINDOW / EXO_COMPACT_AUTO: the defaults, applied and reported, without a question.
+  assert.deepEqual(readJson(userSettings(box)), { autoCompactWindow: 200000 });
+  assert.deepEqual(readJson(autoCompactMarker(box)), { window: 200000, enabled: true });
+  assert.match(result.stdout, /exo-compact: set Claude Code's auto-compact window to 200k tokens \(it was the model's window\)/);
+  assert.doesNotMatch(result.stdout + result.stderr, /\[Y\/n/);
 }
 
-test('install.sh: a fresh install clones, registers the plugin with only the plugin directory and Node set, and writes no flag file', { skip: noPosix }, () => {
+const userSettings = (box) => path.join(box.home, '.claude', 'settings.json');
+const autoCompactMarker = (box) => path.join(box.home, '.claude', 'exovault', 'auto-compact.json');
+const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+const installCall = (calls) => calls.find((call) => call[1] === 'install');
+
+/** 4.10.0 (CONTRACT S5x): the environment answers both questions; a bad answer stops before anything is cloned. */
+function stageAutoCompactAnswers(run) {
+  const lower = sandbox();
+  const result = run({ ...lower.env, EXO_COMPACT_WINDOW: '300000', EXO_COMPACT_AUTO: '0' });
+  assert.equal(result.status, 0, result.stderr);
+  assertInstallConfigs(installCall(lower.readCalls()), undefined, { autoCompact: 'false', autoCompactWindow: '300000' });
+  assert.deepEqual(readJson(userSettings(lower)), { autoCompactWindow: 300000 });
+  assert.deepEqual(readJson(autoCompactMarker(lower)), { window: 300000, enabled: false });
+
+  const on = sandbox();
+  fs.mkdirSync(path.dirname(userSettings(on)), { recursive: true });
+  fs.writeFileSync(userSettings(on), '{\n  "model": "opus",\n  "autoCompactEnabled": false\n}\n');
+  const turned = run({ ...on.env, EXO_COMPACT_WINDOW: '0', EXO_COMPACT_AUTO: '1' });
+  assert.equal(turned.status, 0, turned.stderr);
+  assertInstallConfigs(installCall(on.readCalls()), undefined, { autoCompact: 'true', autoCompactWindow: '0' });
+  assert.equal(fs.readFileSync(userSettings(on), 'utf8'), '{\n  "model": "opus",\n  "autoCompactEnabled": true\n}\n');
+  assert.match(turned.stdout, /exo-compact: turned auto-compact on\./);
+
+  for (const [name, value] of [['EXO_COMPACT_WINDOW', 'lots'], ['EXO_COMPACT_WINDOW', '50000'], ['EXO_COMPACT_AUTO', 'maybe']]) {
+    const bad = sandbox();
+    const refused = run({ ...bad.env, [name]: value });
+    assert.notEqual(refused.status, 0, `${name}=${value} is refused`);
+    assert.match(refused.stderr, new RegExp(name));
+    assert.deepEqual(bad.readCalls(), []);
+    assert.ok(!fs.existsSync(bad.clone), 'nothing was cloned');
+  }
+}
+
+/** A second run finds the marker: it asks nothing and passes no answer, unless the environment gives one. */
+function stageAutoCompactSecondRun(run) {
+  const box = sandbox();
+  assert.equal(run(box.env).status, 0);
+  fs.writeFileSync(userSettings(box), '{\n  "autoCompactWindow": 500000\n}\n');
+  const before = box.readCalls().length;
+  const again = run(box.env);
+  assert.equal(again.status, 0, again.stderr);
+  assertInstallConfigs(installCall(box.readCalls().slice(before)), undefined, {});
+  assert.doesNotMatch(again.stdout, /auto-compact/);
+  assert.equal(fs.readFileSync(userSettings(box), 'utf8'), '{\n  "autoCompactWindow": 500000\n}\n', 'the window the user set by hand stays');
+
+  const middle = box.readCalls().length;
+  const answered = run({ ...box.env, EXO_COMPACT_WINDOW: '150000' });
+  assert.equal(answered.status, 0, answered.stderr);
+  assertInstallConfigs(installCall(box.readCalls().slice(middle)), undefined, { autoCompactWindow: '150000' });
+  assert.deepEqual(readJson(userSettings(box)), { autoCompactWindow: 150000 });
+  assert.match(answered.stdout, /set Claude Code's auto-compact window to 150k tokens \(it was 500k tokens\)/);
+}
+
+test('install.sh: a fresh install clones, registers the plugin with the plugin directory, Node and the auto-compact defaults set, and writes no flag file', { skip: noPosix }, () => {
   const box = sandbox();
   assertFreshInstall(box, runSh(box.env));
 });
@@ -159,7 +220,7 @@ test('install.sh: a second run updates the clone and keeps the options the user 
   assert.ok(fs.existsSync(path.join(box.clone, 'NEW.txt')), 'the clone was updated');
   const calls = box.readCalls().slice(before);
   const install = calls.find((call) => call[1] === 'install');
-  assertInstallConfigs(install);
+  assertInstallConfigs(install, undefined, {});
   assert.ok(calls.some((call) => call.join(' ') === 'plugin marketplace update exo-compact'));
   assert.ok(calls.some((call) => call.join(' ') === 'plugin update exo-compact@exo-compact'));
   assert.match(result.stdout, /is installed/);
@@ -196,6 +257,14 @@ function stageMainAhead(box, run) {
   assert.equal(again.status, 0, again.stderr);
   assert.equal(git(box.clone, 'rev-parse', 'HEAD'), tagged, 'a second run stays at the tag');
 }
+
+test('install.sh: EXO_COMPACT_WINDOW and EXO_COMPACT_AUTO answer the auto-compact questions, and a bad value stops the install', { skip: noPosix }, () => {
+  stageAutoCompactAnswers(runSh);
+});
+
+test('install.sh: a second run asks nothing about auto-compact and passes only an answer the environment gives', { skip: noPosix }, () => {
+  stageAutoCompactSecondRun(runSh);
+});
 
 test('install.sh: the default ref is the release tag, so main moving ahead installs nothing new', { skip: noPosix }, () => {
   stageMainAhead(sandbox(), runSh);
@@ -259,7 +328,7 @@ test('install.sh: a folder that is not a clone is left alone', { skip: noPosix }
   assert.deepEqual(box.readCalls(), []);
 });
 
-test('install.ps1: a fresh install clones, registers the plugin with only the plugin directory and Node set, and writes no flag file', { skip: noPwsh }, () => {
+test('install.ps1: a fresh install clones, registers the plugin with the plugin directory, Node and the auto-compact defaults set, and writes no flag file', { skip: noPwsh }, () => {
   const box = sandbox();
   assertFreshInstall(box, runPs1(box.env));
 });
@@ -292,8 +361,16 @@ test('install.ps1: a second run sets only the plugin directory and Node again an
   assert.equal(result.status, 0, result.stderr);
   const calls = box.readCalls().slice(before);
   const install = calls.find((call) => call[1] === 'install');
-  assertInstallConfigs(install);
+  assertInstallConfigs(install, undefined, {});
   assert.ok(calls.some((call) => call.join(' ') === 'plugin update exo-compact@exo-compact'));
+});
+
+test('install.ps1: EXO_COMPACT_WINDOW and EXO_COMPACT_AUTO answer the auto-compact questions, and a bad value stops the install', { skip: noPwsh }, () => {
+  stageAutoCompactAnswers(runPs1);
+});
+
+test('install.ps1: a second run asks nothing about auto-compact and passes only an answer the environment gives', { skip: noPwsh }, () => {
+  stageAutoCompactSecondRun(runPs1);
 });
 
 test('install.ps1: the default ref is the release tag, so main moving ahead installs nothing new', { skip: noPwsh }, () => {

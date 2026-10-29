@@ -20,6 +20,9 @@ describe('isWarningLine: the quiet-mode transcript list', () => {
     'brief_limits.fired=0 reason=error', 'task_card.refresh=error', 'adopted.copied=error', 'work_state.notification_write=error',
     'compact.jev_skipped=error', 'seed.task_brief=error', 'brief.saved=0 brief.chars=100', 'brief.saved=0', 'capture.timeout',
     'labels.jev=error', 'brief_check.ready=error',
+    "exo-compact: set Claude Code's auto-compact window to 200k tokens (it was the model's window); turned auto-compact on. Change it with /plugin configure exo-compact.",
+    'exo-compact: DISABLE_AUTO_COMPACT is set, so auto-compact stays off and exo-compact does not run when the window fills. Unset it to turn auto-compact on.',
+    'exo-compact: auto-compact settings not checked (timed out after 3000 ms).',
   ];
   const hidden = [
     'rule_check.fired=0 broken=0', 'rule_check.fired=0 reason=no_result', 'rule_check.fired=0 reason=card_stale', 'brief_push.fired=0 on=write',
@@ -27,7 +30,7 @@ describe('isWarningLine: the quiet-mode transcript list', () => {
     'task_card.refresh=start ctx=100 window=200 n=1', 'task_card.refresh=written size=900', 'brief.saved=1 brief.chars=4000',
     'compact.sizeBefore=217000', 'seed.budget_total=20000 seed.budget_count=real', 'seed.task_card=1 seed.task_card_size=900', 'dense.jev=skipped',
     'labels.applied=2 labels.missing=0', 'recall.build_started=1', 'compact.trigger_skipped=first_prompt', 'compact.jev_skipped=disabled', 'brief_push.armed=1',
-    'compact.route=next', 'seed.compaction_pressure=2',
+    'compact.route=next', 'seed.compaction_pressure=2', 'exo-compact: compacting the finished task first',
   ];
   it.each(shown)('shows %s', (line) => { expect(isWarningLine(line)).toBe(true); });
   it.each(hidden)('hides %s', (line) => { expect(isWarningLine(line)).toBe(false); });
@@ -331,7 +334,7 @@ describe('compact.ts has one logging function', () => {
   it('spells $.ui.log once per handler (the notice host)', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('../compact.ts', import.meta.url), 'utf8');
-    expect(source.match(/\$\.ui\.log\(/g)?.length ?? 0).toBe(12); // n = six notice hosts, five gating catch notices and session.start's preflight warning
+    expect(source.match(/\$\.ui\.log\(/g)?.length ?? 0).toBe(13); // n = seven notice hosts (session.start's for S5x), five gating catch notices and session.start's preflight warning
   });
 });
 
