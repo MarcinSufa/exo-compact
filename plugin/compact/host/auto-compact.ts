@@ -19,6 +19,8 @@ export interface AutoCompactHost {
   home: () => Promise<string | undefined>;
   /** CLAUDE_CONFIG_DIR from the hook's own environment. */
   configDir: () => Promise<string | undefined>;
+  /** 4.10.1 (CONTRACT S5y): `$.session.cwd()`, whose transcripts show whether another plugin skips exo-compact's hooks. */
+  cwd: () => Promise<string | undefined>;
 }
 
 export const AUTO_COMPACT_TIMEOUT_MS = 3000;
@@ -32,7 +34,8 @@ export async function runAutoCompact(host: AutoCompactHost): Promise<string[]> {
     const home = await host.home();
     const configDir = await host.configDir();
     if (!home && !configDir) return ['exo-compact: auto-compact settings not checked (no home directory).'];
-    const dirs = [...(home ? ['--home', home] : []), ...(configDir ? ['--config-dir', configDir] : [])];
+    const cwd = await host.cwd();
+    const dirs = [...(home ? ['--home', home] : []), ...(configDir ? ['--config-dir', configDir] : []), ...(cwd ? ['--cwd', cwd] : [])];
     const ran = await host.run(['node', `${pluginRoot}/auto-compact.mjs`, 'apply', String(host.window), String(host.enabled), ...dirs], { timeoutMs: AUTO_COMPACT_TIMEOUT_MS });
     const lines = String(ran.stdout ?? '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('exo-compact:'));
     if (lines.length > 0 || ran.exitCode === 0) return lines;

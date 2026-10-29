@@ -2,6 +2,20 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## 4.10.1 - 2026-10-29
+
+- Claude Code 2.1.312's built-in `cc-plugin-sec-default` runs before user plugins and sends their hook events on past
+  them, so exo-compact's hooks never run and every compaction is native (S5y). `setup.cjs doctor` now reads the skip
+  lines Claude Code leaves in the newest transcripts of the project and warns, naming the plugin and the events, with
+  two fixes: `"appendPlugins": ["exo-compact@exo-compact"]` in the user settings, or an administrator's managed
+  settings entry.
+- `setup.cjs doctor digest [folder]` prints the `pluginDigests` value managed settings need for that entry, computed
+  as Claude Code does, and refuses a folder Claude Code would refuse (a symlink, too many files) or one whose files
+  have CRLF line endings.
+- While the hooks are skipped, the session start leaves the auto-compact settings alone and says why in one line:
+  a smaller window would only bring the native compaction sooner. The settings are applied after the fix.
+- README: "Hooks skipped by another plugin", how to recognize it and both fixes, with the managed settings JSON.
+
 ## 4.10.0 - 2026-10-29
 
 - The plugin sets Claude Code's auto-compact window and turns auto-compact on (S5x). Two new options come first in

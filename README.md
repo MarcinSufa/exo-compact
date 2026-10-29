@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-4.10.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-4.10.1-blue">
   <img alt="status" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.278-8A2BE2">
@@ -526,6 +526,62 @@ uninstall exo-compact@exo-compact` removes it. The full uninstall and what it
 leaves behind are in [docs/install.md](docs/install.md#opt-out-and-uninstall).
 
 </details>
+
+## Hooks skipped by another plugin
+
+Claude Code can seat a plugin in front of the user tier, for example its built-in
+`cc-plugin-sec-default@builtin` on a machine with managed settings or an organization plan. When that plugin
+sends an event on past the user tier, exo-compact never sees it and every compaction is native. Claude Code then
+writes lines like this one into the session:
+
+```text
+exo-compact: its session.compact hook was skipped. "cc-plugin-sec-default" runs first and sent the event on past it.
+```
+
+`setup.cjs doctor` finds these lines in the newest transcripts of the folder it runs in and names the plugin
+and the events. While they are there, exo-compact also leaves the auto-compact settings alone (a smaller window
+would only bring the native compaction sooner) and applies them at the first session start after the fix.
+
+**Fix 1, your own machine.** Add this to your user `settings.json` (`~/.claude/settings.json`), then restart
+Claude Code:
+
+```json
+{ "appendPlugins": ["exo-compact@exo-compact"] }
+```
+
+It does nothing when Claude Code's debug log (`claude --debug`) says
+`exo-compact@exo-compact in user settings ignored`: that happens when the organization's plan seats the other
+plugin, in a hosted session, or on a machine that has managed settings. Then only Fix 2 helps.
+
+**Fix 2, an administrator.** The managed settings enable the plugin, seat it in the append tier and name the
+digest of each release they allow:
+
+```json
+{
+  "enabledPlugins": { "exo-compact@exo-compact": true },
+  "appendPlugins": ["exo-compact@exo-compact"],
+  "extraKnownMarketplaces": {
+    "exo-compact": {
+      "source": { "source": "github", "repo": "MarcinSufa/exo-compact" },
+      "pluginDigests": { "exo-compact": ["sha256-..."] }
+    }
+  }
+}
+```
+
+The digest covers every file of the plugin folder, so each release has its own. Print it from an installed copy:
+
+```bash
+node ~/.exo-compact/plugin/compact/setup.cjs doctor digest          # the copy Claude Code loads here
+node ~/.exo-compact/plugin/compact/setup.cjs doctor digest <folder> # any plugin folder
+```
+
+It refuses a folder with a symbolic link or with CRLF line endings (a checkout that converted them), because
+that digest would not match the published files. Instead of digests, the managed settings can also declare the
+marketplace as a local directory that lists the plugin by a relative path.
+
+These rules are read from Claude Code 2.1.312 (its settings descriptions and the code that computes the digest),
+not tested against a live managed setup. The digest layout is pinned by a test.
 
 ## Status and limitations
 

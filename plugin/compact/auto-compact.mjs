@@ -7,15 +7,20 @@
 // later change by hand stays.
 // It reads one key, `autoCompactEnabled`, from the legacy global config (`~/.claude.json`, which also holds
 // credentials) and never writes or prints that file.
-// Usage: node auto-compact.mjs apply <window|keep> <true|false|keep> [--home <abs>] [--config-dir <abs>] [--json]
+// Usage: node auto-compact.mjs apply <window|keep> <true|false|keep> [--home <abs>] [--config-dir <abs>] [--cwd <abs>] [--json]
 // --home / --config-dir: the hook passes the directories it resolved itself; with either one the process
 // environment is not used for any path, because a project settings `env` block reaches this child's environment.
+// 4.10.1 (CONTRACT S5y) --cwd: the session's folder. When its newest transcripts show another plugin sending
+// exo-compact's hook events on past it, nothing is written and no marker is recorded, so the answer applies once
+// that is fixed.
 // Exit codes: 0 done or nothing to do, 1 the settings file cannot be read, is not a JSON object or kept changing
 // (or the write failed), 2 bad arguments.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findBypass } from './bypass.mjs';
+import { claudeProjectDir } from './recall/paths.mjs';
 
 export const MIN_WINDOW = 100_000;
 export const MAX_WINDOW = 1_000_000;
@@ -32,7 +37,7 @@ export function configPaths(env, home) {
   };
 }
 
-/** `{ window, enabled, json, home, configDir }`, window and enabled a value or 'keep'; undefined for anything else. */
+/** `{ window, enabled, json, home, configDir, cwd }`, window and enabled a value or 'keep'; undefined for anything else. */
 export function parseApplyArgs(argv) {
   const positional = [];
   const dirs = {};
@@ -40,10 +45,10 @@ export function parseApplyArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--json') json = true;
-    else if (arg === '--home' || arg === '--config-dir') {
+    else if (arg === '--home' || arg === '--config-dir' || arg === '--cwd') {
       const value = argv[i + 1];
       if (value === undefined || !path.isAbsolute(value)) return undefined;
-      dirs[arg === '--home' ? 'home' : 'configDir'] = value;
+      dirs[{ '--home': 'home', '--config-dir': 'configDir', '--cwd': 'cwd' }[arg]] = value;
       i += 1;
     } else positional.push(arg);
   }
@@ -172,10 +177,17 @@ const sameBytes = (a, b) => (a === undefined || b === undefined ? a === b : a.eq
  * Reads, plans, writes. `paths` comes from configPaths; `beforeWrite(attempt)` is a test seam run between the plan
  * and the check that the file is still what was read. Returns `{ code, lines, plan }`; never throws.
  */
-export function applyAutoCompact({ window, enabled, env, paths: files, beforeWrite }) {
+export function applyAutoCompact({ window, enabled, env, paths: files, beforeWrite, bypass }) {
   const marker = readMarker(files.marker);
   const due = (window !== KEEP && marker?.window !== window) || (enabled !== KEEP && marker?.enabled !== enabled);
   if (!due) return { code: 0, lines: [], plan: { set: {}, marker: undefined, lines: [] } };
+  const skipped = bypass?.() ?? [];
+  if (skipped.length) {
+    const by = skipped.map((entry) => `"${entry.by}"`).join(' and ');
+    const events = [...new Set(skipped.flatMap((entry) => entry.events))].join(', ');
+    const line = `exo-compact: auto-compact settings left alone: ${by} runs first and sends exo-compact's hook events on past it (${events}), so every compaction is native and a smaller window would only bring it sooner. Run node "${path.join(path.dirname(fileURLToPath(import.meta.url)), 'doctor.mjs')}" for the fix; the settings are applied at the first session start after it.`;
+    return { code: 0, lines: [line], plan: { set: {}, marker: undefined, lines: [line] } };
+  }
 
   let plan;
   for (let attempt = 0; ; attempt += 1) {
@@ -228,12 +240,14 @@ function fail(line) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = parseApplyArgs(process.argv.slice(2));
   if (!args) {
-    process.stderr.write('usage: node auto-compact.mjs apply <window|keep> <true|false|keep> [--home <abs>] [--config-dir <abs>] [--json]\n');
+    process.stderr.write('usage: node auto-compact.mjs apply <window|keep> <true|false|keep> [--home <abs>] [--config-dir <abs>] [--cwd <abs>] [--json]\n');
     process.exitCode = 2;
   } else {
     const fromHook = args.home !== undefined || args.configDir !== undefined;
     const paths = fromHook ? configPaths({ CLAUDE_CONFIG_DIR: args.configDir }, args.home) : configPaths(process.env, os.homedir());
-    const result = applyAutoCompact({ window: args.window, enabled: args.enabled, env: process.env, paths });
+    const projectDir = args.cwd === undefined ? undefined : claudeProjectDir(args.cwd, fromHook ? { CLAUDE_CONFIG_DIR: args.configDir } : process.env, fromHook ? args.home : os.homedir());
+    const bypass = projectDir === undefined ? undefined : () => findBypass(projectDir);
+    const result = applyAutoCompact({ window: args.window, enabled: args.enabled, env: process.env, paths, bypass });
     if (args.json) process.stdout.write(`${JSON.stringify({ set: result.plan.set, marker: result.plan.marker ?? null, lines: result.lines })}\n`);
     else if (result.lines.length) process.stdout.write(`${result.lines.join('\n')}\n`);
     process.exitCode = result.code;

@@ -3,12 +3,15 @@
 // Without this, a missing or wrong key silently falls back to selector D.
 // Exit codes: 0 ok (warnings allowed), 1 hard failure, 3 Jev enabled with --jev but not working.
 // 4.7.5: a Jev option that is on in Claude Code's settings.json gets the same key check, as a warning with exit 0.
+// 4.10.1 (CONTRACT S5y): `doctor.mjs digest [folder]` prints the pluginDigests digest of the copy Claude Code loads.
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configPaths, withoutBom } from './auto-compact.mjs';
+import { findBypass, pluginDigest } from './bypass.mjs';
+import { claudeProjectDir } from './recall/paths.mjs';
 import { jevEndpoint, jevOrigin, TYPESAFE_URL as DEFAULT_JEV_URL } from './recall/jev-endpoint.mjs';
 
 // Kept in step with host/jev-client.ts and core/select-j.ts by doctor.test.ts.
@@ -198,6 +201,22 @@ function checkAutoCompact(deps, add) {
 }
 
 const MAX_RECOMMENDED_WINDOW = 200_000;
+
+const PLUGIN_ID = 'exo-compact@exo-compact';
+const BYPASS_SECTION = 'README, "Hooks skipped by another plugin"';
+
+// 4.10.1 (CONTRACT S5y): a plugin seated before the user tier sends exo-compact's events on past it.
+function checkBypass(deps, add) {
+  let found;
+  try { found = deps.bypass?.() ?? []; } catch { found = []; }
+  for (const { by, events, file } of found) {
+    add('bypass', 'warn', [
+      `exo-compact's hooks are skipped: "${by}" runs first and sends ${events.join(', ')} on past exo-compact (${file}), so every compaction is native.`,
+      `  Fix 1: add "appendPlugins": ["${PLUGIN_ID}"] to ${settingsFiles(deps)[0]}, then restart Claude Code. It does nothing if Claude Code's debug log (claude --debug) says "${PLUGIN_ID} in user settings ignored".`,
+      `  Fix 2, then: an administrator lists the plugin in the managed settings (${BYPASS_SECTION}); node "${path.join(deps.pluginRoot, 'doctor.mjs')}" digest prints the digest that entry names.`,
+    ].join('\n'));
+  }
+}
 
 function checkNode(nodeVersion, add) {
   const node = parseVersion(nodeVersion);
@@ -417,6 +436,7 @@ export async function runDoctor(deps) {
     else add('interactive-only', 'ok', `interactiveOnly: on, terminal and VS Code or Cursor extension sessions use S4; -p and SDK runs stay on native compaction. ${INTERACTIVE_ONLY_HINT}`);
 
     checkAutoCompact(deps, add);
+    checkBypass(deps, add);
   }
 
   let jev = 'off';
@@ -539,10 +559,24 @@ async function versionsMain(argv) {
   return 1;
 }
 
+function digestMain(argv, pluginRoot) {
+  const folder = argv[1] !== undefined ? path.resolve(argv[1]) : loadedInstall(pluginRecords(process.env, pluginRoot).installed(), process.cwd())?.installPath ?? pluginRoot;
+  const result = pluginDigest(folder);
+  if (result.problem) {
+    process.stdout.write(`exo-compact digest: no digest for ${folder}: ${result.problem}.\n`);
+    return 1;
+  }
+  const where = 'Managed settings name it under extraKnownMarketplaces["exo-compact"].pluginDigests["exo-compact"]';
+  const lines = [result.digest, `exo-compact digest: ${folder}, ${result.files} files. ${where} (${BYPASS_SECTION}).`, ...result.notes.map((note) => `exo-compact digest: note: ${note}.`)];
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return 0;
+}
+
 async function main(argv) {
   if (argv.includes('--versions')) return versionsMain(argv);
-  const modelAt = argv.indexOf('--jev-model');
   const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
+  if (argv[0] === 'digest') return digestMain(argv, pluginRoot);
+  const modelAt = argv.indexOf('--jev-model');
   const result = await runDoctor({
     env: process.env,
     nodeVersion: process.versions.node,
@@ -555,7 +589,7 @@ async function main(argv) {
     pluginRoot,
     // --preflight (the installers): no folder is turned on yet, so the checks about a session in the cwd and about the
     // installed copy are left out.
-    ...(argv.includes('--preflight') ? {} : { cwd: process.cwd(), home: os.homedir(), readFile: (file) => fs.readFileSync(file, 'utf8'), plugins: pluginRecords(process.env, pluginRoot) }),
+    ...(argv.includes('--preflight') ? {} : { cwd: process.cwd(), home: os.homedir(), readFile: (file) => fs.readFileSync(file, 'utf8'), plugins: pluginRecords(process.env, pluginRoot), bypass: () => findBypass(claudeProjectDir(process.cwd(), process.env, os.homedir())) }),
   });
   process.stdout.write(`${argv.includes('--json') ? JSON.stringify(result) : formatReport(result)}\n`);
   return exitCode(result);

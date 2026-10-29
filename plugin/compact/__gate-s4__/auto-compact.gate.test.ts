@@ -303,7 +303,7 @@ describe('S5x session.start runs auto-compact.mjs once per process, attended and
     await settle();
     expect(s.autoRuns()).toHaveLength(1);
     const run = s.autoRuns()[0]!;
-    expect(run.argv).toEqual(['node', '/plugin/auto-compact.mjs', 'apply', '200000', 'true', '--home', '/home/u']);
+    expect(run.argv).toEqual(['node', '/plugin/auto-compact.mjs', 'apply', '200000', 'true', '--home', '/home/u', '--cwd', '/home/u/work/repo']);
     expect(run.init.timeoutMs).toBe(AUTO_COMPACT_TIMEOUT_MS);
     expect(AUTO_COMPACT_TIMEOUT_MS).toBeLessThanOrEqual(3000);
     expect(run.init.env).toMatchObject(SCRUBBED_ENV);
@@ -313,7 +313,7 @@ describe('S5x session.start runs auto-compact.mjs once per process, attended and
   it('passes the configured values and the nodePath binary', async () => {
     const s = await start({ autoCompactWindow: 0, autoCompact: false, nodePath: '/opt/node/bin/node' }, { exists: (file) => file === '/opt/node/bin/node' });
     await s.fire();
-    expect(s.autoRuns().map((run) => run.argv)).toEqual([['/opt/node/bin/node', '/plugin/auto-compact.mjs', 'apply', '0', 'false', '--home', '/home/u']]);
+    expect(s.autoRuns().map((run) => run.argv)).toEqual([['/opt/node/bin/node', '/plugin/auto-compact.mjs', 'apply', '0', 'false', '--home', '/home/u', '--cwd', '/home/u/work/repo']]);
   });
 
   it('an unattended session (-p, the SDK, a child run) never runs it', async () => {
@@ -362,7 +362,7 @@ describe('S5x session.start runs auto-compact.mjs once per process, attended and
     });
     await s.fire();
     await settle();
-    expect(s.autoRuns()[0]!.argv.slice(5)).toEqual(['--home', b.base, '--config-dir', b.dir]);
+    expect(s.autoRuns()[0]!.argv.slice(5)).toEqual(['--home', b.base, '--config-dir', b.dir, '--cwd', '/home/u/work/repo']);
     expect(JSON.parse(read(b.settings))).toEqual({ autoCompactWindow: 200000 });
     expect(marker(b)).toEqual({ window: 200000, enabled: true });
     expect(existsSync(hostile.dir)).toBe(false);

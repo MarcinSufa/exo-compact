@@ -48,6 +48,6 @@ if (action === "enable") {
   const result = spawnSync(process.execPath, [doctor, ...process.argv.slice(3)], { stdio: "inherit" });
   process.exitCode = result.status ?? 1;
 } else {
-  process.stderr.write("Usage: node setup.cjs enable|disable|optout|optin [dir] | doctor [--jev] [--json] [--preflight] | cleanup [--apply] [--days N] [--capture-root DIR]\n");
+  process.stderr.write("Usage: node setup.cjs enable|disable|optout|optin [dir] | doctor [--jev] [--json] [--preflight] | doctor digest [folder] | cleanup [--apply] [--days N] [--capture-root DIR]\n");
   process.exitCode = 2;
 }

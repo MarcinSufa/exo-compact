@@ -169,6 +169,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           enabled: optionBoolean(options, 'autoCompact', true),
           home: homeDir,
           configDir: async () => $.env.get('CLAUDE_CONFIG_DIR'),
+          cwd: () => $.session.cwd(),
         });
         for (const line of lines) notice(line);
       }

@@ -29,7 +29,7 @@ function Get-ExoCompactWindow([string] $text) {
 
 function Install-ExoCompact {
     $repo = if ($env:EXO_COMPACT_REPO) { $env:EXO_COMPACT_REPO } else { 'https://github.com/MarcinSufa/exo-compact.git' }
-    $ref = if ($env:EXO_COMPACT_REF) { $env:EXO_COMPACT_REF } else { 'v4.10.0' }
+    $ref = if ($env:EXO_COMPACT_REF) { $env:EXO_COMPACT_REF } else { 'v4.10.1' }
     $dir = if ($env:EXO_COMPACT_HOME) { $env:EXO_COMPACT_HOME } else { Join-Path $HOME '.exo-compact' }
     $enableDir = if ($env:EXO_COMPACT_ENABLE_DIR) { $env:EXO_COMPACT_ENABLE_DIR } else { '' }
     $plugin = Join-Path (Join-Path $dir 'plugin') 'compact'

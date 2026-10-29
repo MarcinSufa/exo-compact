@@ -21,6 +21,11 @@ export function claudeProjectsDir(env = process.env, home = homeDir(env)) {
   return path.join(claudeConfigDir(env, home), 'projects');
 }
 
+/** One project's transcript dir, the same derivation as host/transcript-path.ts (a test pins both). */
+export function claudeProjectDir(cwd, env = process.env, home = homeDir(env)) {
+  return path.join(claudeProjectsDir(env, home), cwd.replace(/[^A-Za-z0-9]/g, '-'));
+}
+
 export function recallRootDir(env = process.env, home = homeDir(env)) {
   return path.join(home, '.claude', 'exovault', 'recall');
 }
