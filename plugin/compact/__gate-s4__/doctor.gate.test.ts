@@ -126,6 +126,7 @@ describe('4.7.5 (S5o) a Jev option that is on without a working key is named', (
     const settings = (options: unknown, key = 'exo-compact@exo-compact') => JSON.stringify({ pluginConfigs: { [key]: { options }, 'other@x': { options: { ruleCheck: true } } } });
     expect(doctor.jevOptionsOn(settings({ ruleCheck: true, jevEnabled: 'true', recallEnabled: true }))).toEqual(['ruleCheck', 'jevEnabled']);
     expect(doctor.jevOptionsOn(settings({ ruleCheck: true }, 'exo-compact'))).toEqual(['ruleCheck']);
+    expect(doctor.jevOptionsOn(`﻿${settings({ ruleCheck: true })}`)).toEqual(['ruleCheck']);
     expect(doctor.jevOptionsOn(settings({ ruleCheck: false, jevEnabled: 'false' }))).toEqual([]);
     expect(doctor.jevOptionsOn(JSON.stringify({ pluginConfigs: { 'other@x': { options: { ruleCheck: true } } } }))).toEqual([]);
     for (const text of [null, undefined, '', '{', '[]', '{"pluginConfigs":7}', '{"pluginConfigs":{"exo-compact@exo-compact":null}}']) expect(doctor.jevOptionsOn(text)).toEqual([]);

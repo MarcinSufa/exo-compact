@@ -2,6 +2,12 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## 4.10.2 - 2026-10-29
+
+- `setup.cjs doctor` reads a settings file, `installed_plugins.json` or `known_marketplaces.json` saved with a UTF-8
+  BOM (as Windows PowerShell 5.1 writes it with `-Encoding UTF8`) instead of treating it as unreadable. Before, a BOM made the
+  interactive-only and Jev checks fall back to their defaults and `doctor digest` report no installed copy.
+
 ## 4.10.1 - 2026-10-29
 
 - Claude Code 2.1.312's built-in `cc-plugin-sec-default` runs before user plugins and sends their hook events on past
