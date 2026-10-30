@@ -177,6 +177,11 @@ describe('doctor interactive-only', () => {
     expect(explicitRow.message).not.toContain(INTERACTIVE_ONLY_HINT);
   });
 
+  it('reads a settings file saved with a UTF-8 BOM', async () => {
+    const bom = await session({ [user]: `﻿${settings(false)}` });
+    expect(check(bom.result, 'interactive-only').message).toBe('interactiveOnly: off, every session kind uses S4');
+  });
+
   it.each(['cli', 'claude-vscode'])('is ok when the option is true and the entrypoint is %s', async (entrypoint) => {
     const r = await session({ [local]: settings(true) }, { CLAUDE_CODE_ENTRYPOINT: entrypoint });
     const row = check(r.result, 'interactive-only');

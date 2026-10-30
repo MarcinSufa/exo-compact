@@ -246,7 +246,7 @@ describe('S5y the pluginDigests digest', () => {
     const base = temp();
     const config = path.join(base, 'config');
     const dir = pluginFolder();
-    write(path.join(config, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'exo-compact@exo-compact': [{ scope: 'user', installPath: dir, version: '4.10.1' }] } }));
+    write(path.join(config, 'plugins', 'installed_plugins.json'), `﻿${JSON.stringify({ version: 2, plugins: { 'exo-compact@exo-compact': [{ scope: 'user', installPath: dir, version: '4.10.1' }] } })}`);
     const env = { ...baseEnv(), HOME: base, USERPROFILE: base, CLAUDE_CONFIG_DIR: config };
     const ran = spawnSync(process.execPath, [DOCTOR, 'digest'], { cwd: base, encoding: 'utf8', env });
     expect(ran.stdout.split('\n')[0]).toBe(expectedDigest(LAYOUT));

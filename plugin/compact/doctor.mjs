@@ -50,7 +50,7 @@ const keyHelpFor = (names) => [
 /** The Jev options that are on for this plugin in the text of Claude Code's settings.json; [] when there is none or it cannot be read. */
 export function jevOptionsOn(settingsText) {
   let settings;
-  try { settings = JSON.parse(settingsText ?? ''); } catch { return []; }
+  try { settings = JSON.parse(withoutBom(settingsText ?? '')); } catch { return []; }
   const configs = settings?.pluginConfigs;
   if (!configs || typeof configs !== 'object') return [];
   const on = new Set();
@@ -153,7 +153,7 @@ function readInteractiveOnly(files, readFile) {
   let value;
   for (const file of files) {
     let settings;
-    try { settings = JSON.parse(readFile(file)); } catch { continue; }
+    try { settings = JSON.parse(withoutBom(readFile(file))); } catch { continue; }
     for (const [key, config] of Object.entries(settings?.pluginConfigs ?? {})) {
       const option = config?.options?.interactiveOnly;
       if (PLUGIN_CONFIG_KEY.test(key) && typeof option === 'boolean') value = option;
@@ -520,7 +520,7 @@ function configDir(env) {
 }
 
 function readJson(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  try { return JSON.parse(withoutBom(fs.readFileSync(file, 'utf8'))); } catch { return null; }
 }
 
 // The plugin records Claude Code keeps under <config>/plugins, and git with no prompt and a time limit.

@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-4.10.1-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-4.10.2-blue">
   <img alt="status" src="https://img.shields.io/badge/status-beta-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.278-8A2BE2">
@@ -570,11 +570,11 @@ digest of each release they allow:
 ```
 
 The digest covers every file of the plugin folder, so each release has its own: compute it again for every
-release you allow, from a fresh clone of its tag with LF line endings (replace `v4.10.1` with the release):
+release you allow, from a fresh clone of its tag with LF line endings (replace `v4.10.2` with the release):
 
 ```bash
-git clone --depth 1 --branch v4.10.1 --config core.autocrlf=false https://github.com/MarcinSufa/exo-compact.git exo-compact-v4.10.1
-node exo-compact-v4.10.1/plugin/compact/doctor.mjs digest exo-compact-v4.10.1/plugin/compact
+git clone --depth 1 --branch v4.10.2 --config core.autocrlf=false https://github.com/MarcinSufa/exo-compact.git exo-compact-v4.10.2
+node exo-compact-v4.10.2/plugin/compact/doctor.mjs digest exo-compact-v4.10.2/plugin/compact
 ```
 
 The first line it prints is the value for `pluginDigests`. `node <plugin>/setup.cjs doctor digest` without a folder
