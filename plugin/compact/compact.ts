@@ -32,7 +32,7 @@ import type { FlagHost } from './host/capture-flag.js';
 import { captureBeforeNext } from './host/capture-order.js';
 import { getJevEndpoint, makeJevAsk, parseDenseJevResponse, parseJevResponse } from './host/jev-client.js';
 import { sha256 } from './host/sha256.js';
-import { forkReply, type ForkReply, CARD_CUT_SHARE, CARD_TASK_SHARE, CARD_TOTAL_BUDGET_TOKENS, cardBudgets, stretchForTail, TASK_CARD_FILE, TASK_CARD_MAX_TOKENS, TASK_CARD_STATE_FILE, TASK_CARD_BRIEF_FILE, TASK_CARD_HORIZON_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardCheckReason, renderCardPrompt, renderCardSection } from './core/task-card.js';
+import { forkReply, type ForkReply, CARD_CUT_SHARE, CARD_TASK_SHARE, CARD_TOTAL_BUDGET_TOKENS, cardBudgets, stretchForTail, TASK_CARD_FILE, TASK_CARD_MAX_TOKENS, TASK_CARD_STATE_FILE, TASK_CARD_BRIEF_FILE, TASK_CARD_HORIZON_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardCheckReason, renderCardPrompt, renderCardSection, renderCardThreads } from './core/task-card.js';
 import { parseRuleCheck, parseRuleSkip, ruleSkipWarning, parseSeenRules, renderRuleCheckReason, renderSeenRules, RULE_CHECK_SEEN_FILE, RULE_CHECK_TIMEOUT_MS, rulesToBlock } from './core/rule-check.js';
 import { BRIEF_CHECK_ARMED, BRIEF_CHECK_DONE, BRIEF_CHECK_EMPTY, BRIEF_CHECK_FILE, BRIEF_CHECK_TIMEOUT_MS, parseBriefCheck, renderBriefCheckReason } from './core/brief-check.js';
 import { SESSION_PUSH_FILE, SESSION_PUSH_POINTER, SESSION_PUSH_SERVER_DEADLINE_MARGIN_MS, SESSION_PUSH_SERVER_TIMEOUT_MS, SESSION_PUSH_TIMEOUT_MS, parsePushPointer, parseSessionPush, renderSessionPush, type SessionPushFound } from './core/session-push.js';
@@ -45,7 +45,7 @@ import type { NoticeHost, NoticeState } from './host/notices.js';
 import { denseCandidates, denseJevCandidates, renderDense, selectDense } from './core/dense.js';
 import { buildDenseJevRequests, denseJevQuery, parseDenseJevAnswers } from './core/dense-jev.js';
 import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent } from './core/work-state.js';
-import type { WorkStateProbe } from './core/work-state.js';
+import type { WorkState, WorkStateProbe } from './core/work-state.js';
 import { runPreflight } from './host/preflight.js';
 import { runAutoCompact } from './host/auto-compact.js';
 import { trustedPluginRoot } from './host/plugin-root.js';
@@ -728,6 +728,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const values = [...latest.values()].filter((record) => record.kind === 'value').map((record) => JSON.stringify(record.body)).join('\n');
           const todos = [...latest.values()].filter((record) => record.kind === 'todo' && record.body.status !== 'cleared').map((record) => JSON.stringify(record.body)).join('\n');
           let workStateBody = '';
+          let workState: WorkState | undefined;
           if (workStateEnabled) {
             try {
             const sessionCwd = String(await $.session.cwd());
@@ -752,6 +753,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
             const priorSnapshot = [...capturedWorkEvents].reverse().find((item) => item.type === 'cwd_snapshot');
             if (priorSnapshot?.type !== 'cwd_snapshot' || priorSnapshot.path !== sessionCwd) capturedWorkEvents.push({ type: 'cwd_snapshot', path: sessionCwd });
             const state = foldWorkState(capturedWorkEvents, sessionCwd);
+            workState = state;
             let probeDir = sessionCwd;
             try { if (await $.fs.exists(state.directory)) probeDir = state.directory; } catch { probeDir = sessionCwd; }
             let probe: WorkStateProbe | undefined;
@@ -1234,7 +1236,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
           }
           await yieldTick();
           const cardCapTokens = Math.min(TASK_CARD_MAX_TOKENS, Math.round(baseBudgets.seed * 0.6));
-          const taskCardBody = taskCardText === undefined ? '' : renderCardSection(taskCardText, cardPath, countTokens, cardCapTokens);
+          const cardThreads = taskCardText !== undefined && workState ? renderCardThreads(workState) : '';
+          const cardWithoutThreads = taskCardText;
+          if (cardThreads) taskCardText = `${taskCardText}\n${cardThreads}`;
+          let taskCardBody = taskCardText === undefined ? '' : renderCardSection(taskCardText, cardPath, countTokens, cardCapTokens);
           if (taskCardEnabled) notice(`seed.task_card=${taskCardText === undefined ? 0 : 1} seed.task_card_size=${countTokens(taskCardBody)}`);
           // 4.6.0 (CONTRACT S5f, core/since-card.ts): the steps between the card's horizon and the kept tail, one line each.
           let sinceSteps: SinceCardSteps | undefined;
@@ -1295,6 +1300,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
             seedSections = { ...seedSections, denseNotes: denseAt(denseBudgetTokens) };
             rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
             notice(`seed.dense_shrunk=${denseBudgetTokens}`);
+          }
+          // S5y: Open threads and Artifacts repeat the work state, so they go before the recipes. renderSeed empties its
+          // own sections silently to fit, so `overflowed` counts as over budget here.
+          if (cardThreads && cardWithoutThreads !== undefined && (rendered.overflowed || !checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok)) {
+            taskCardText = cardWithoutThreads;
+            taskCardBody = renderCardSection(taskCardText, cardPath, countTokens, cardCapTokens);
+            seedSections = { ...seedSections, taskCard: withCardAge(taskCardBody) };
+            rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
+            notice('seed.card_threads_dropped=1');
           }
           // 4.7.1 (S5k): the recipes give way after the working notes (down to none) and before the brief, the card and the rules.
           // 4.7.0 cut them first, so in a cut that was over budget they never reached the model.

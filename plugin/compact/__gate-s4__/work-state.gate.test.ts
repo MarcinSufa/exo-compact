@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { foldWorkState, parseTaskNotifications, renderWorkState, workEvents } from '../core/work-state.js';
+import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent, workEvents } from '../core/work-state.js';
 import { reconcile } from '../core/extractor.js';
 import { humanPrompt, assistantCall, toolResultsMessage, sha256, countTokens } from './fixtures/helpers.js';
 import type { SessionMessage } from '../core/types.js';
@@ -422,5 +422,49 @@ describe('S4q render details (fix 1 follow-up)', () => {
     expect(rendered).toContain('Directory: /tmp/tmp.Xk9fQ2');
     expect(rendered).toContain('Worktrees: /probe [main]; /event-created [feat]; /probe/w1; /probe/w2; /probe/w3; /probe/w4');
     expect(rendered).not.toContain('/probe/w5');
+  });
+});
+
+describe('card threads: files written', () => {
+  it('captures the path of every Write, Edit, MultiEdit and NotebookEdit, never a secret-like one', () => {
+    const call = (id: string, tool: string, input: Record<string, unknown>): SessionMessage[] => [assistantCall(tool, { tool_use_id: id, input }), toolResultsMessage([{ toolUseId: id, options: { text: 'ok' } }])];
+    const events = workEvents([
+      ...call('w1', 'Write', { file_path: '/p/src/a.ts', content: 'x' }),
+      ...call('w2', 'Edit', { file_path: '/p/src/b.ts', old_string: 'a', new_string: 'b' }),
+      ...call('w3', 'MultiEdit', { file_path: '/p/src/c.ts', edits: [] }),
+      ...call('w4', 'NotebookEdit', { notebook_path: '/p/n.ipynb', new_source: 'x' }),
+      ...call('w5', 'Write', { file_path: '/p/.env', content: 'TOKEN=x' }),
+      ...call('w6', 'Read', { file_path: '/p/src/d.ts' }),
+    ]);
+    expect(events).toEqual([
+      { type: 'file_write', path: '/p/src/a.ts' },
+      { type: 'file_write', path: '/p/src/b.ts' },
+      { type: 'file_write', path: '/p/src/c.ts' },
+      { type: 'file_write', path: '/p/n.ipynb' },
+    ]);
+  });
+
+  it('skips a write whose tool result is an error', () => {
+    const events = workEvents([
+      assistantCall('Write', { tool_use_id: 'f1', input: { file_path: '/p/src/denied.ts', content: 'x' } }),
+      toolResultsMessage([{ toolUseId: 'f1', options: { text: 'Permission denied', isError: true } }]),
+      assistantCall('Edit', { tool_use_id: 'f2', input: { file_path: '/p/src/stale.ts', old_string: 'a', new_string: 'b' } }),
+      toolResultsMessage([{ toolUseId: 'f2', options: { text: 'String to replace not found', isError: true } }]),
+      assistantCall('Edit', { tool_use_id: 'f3', input: { file_path: '/p/src/ok.ts', old_string: 'a', new_string: 'b' } }),
+      toolResultsMessage([{ toolUseId: 'f3', options: { text: 'ok' } }]),
+      assistantCall('Write', { tool_use_id: 'f4', input: { file_path: '/p/src/no-result.ts', content: 'x' } }),
+    ]);
+    expect(events).toEqual([{ type: 'file_write', path: '/p/src/ok.ts' }]);
+  });
+
+  it('folds written files newest last, each once, and keeps the newest ten', () => {
+    const writes = Array.from({ length: 12 }, (_, i) => ({ type: 'file_write' as const, path: `/p/f${i}.ts` }));
+    const state = foldWorkState([...writes, { type: 'file_write', path: '/p/f3.ts' }], '/p');
+    expect(state.files).toEqual(['/p/f2.ts', '/p/f4.ts', '/p/f5.ts', '/p/f6.ts', '/p/f7.ts', '/p/f8.ts', '/p/f9.ts', '/p/f10.ts', '/p/f11.ts', '/p/f3.ts']);
+  });
+
+  it('accepts a stored file_write event and rejects one without a path', () => {
+    expect(validWorkEvent({ type: 'file_write', path: '/p/a.ts' })).toBe(true);
+    expect(validWorkEvent({ type: 'file_write' })).toBe(false);
   });
 });

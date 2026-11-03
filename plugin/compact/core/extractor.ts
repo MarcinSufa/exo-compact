@@ -431,7 +431,7 @@ const redact = redactCapturedText;
  * file.
  */
 const SECRET_LIKE_PATH_PATTERN =
-  /^\.env|\.(pem|key|p12|pfx|pgpass|keystore)$|\bid_(rsa|dsa|ecdsa|ed25519)\b|credential|secret|\.npmrc|\.netrc|settings(\.local)?\.json$|^token.*\.txt$|^service-account.*\.json$/i;
+  /^\.env|\.env$|\.(pem|key|p12|pfx|pgpass|keystore)$|\bid_(rsa|dsa|ecdsa|ed25519)\b|credential|secret|\.npmrc|\.netrc|settings(\.local)?\.json$|^token.*\.txt$|^service-account.*\.json$/i;
 
 function basenameOf(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
@@ -441,7 +441,7 @@ function basenameOf(filePath: string): string {
 
 /** Directories whose files are credentials whatever their name (S4o review, 3.15.2). */
 const SECRET_LIKE_DIR_PATTERN = /(?:^|\/)(?:\.aws|\.kube|\.docker|\.ssh|\.gnupg|\.config\/(?:gh|gcloud))\//i;
-const SECRET_LIKE_EXTRA_BASENAME = /^tokens?(?:[._-][\w.-]*)?\.(?:json|txt|ya?ml|env)$|^hosts\.ya?ml$/i;
+const SECRET_LIKE_EXTRA_BASENAME = /^(?:[\w.-]*[._-])?tokens?(?:[._-][\w.-]*)?\.(?:json|txt|ya?ml|env)$|^hosts\.ya?ml$/i;
 
 export function isSecretLikePath(filePath: string): boolean {
   const base = basenameOf(filePath);

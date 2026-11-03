@@ -103,6 +103,33 @@ describe('4.7.3 (S5m) the card cap never cuts without saying so', () => {
     expect(last).toMatch(/- \(Done left out: 2 lines in \/home\/u\/work\/app\//);
   });
 
+  const THREADS = ['## Open threads', ...Array.from({ length: 6 }, (_, i) => `- background agent a${i} "review slice ${i} of the sidebar tree and its tests"`), '## Artifacts', ...Array.from({ length: 8 }, (_, i) => `- file /home/u/work/app/packages/app/src/part-${i}.ts`)];
+  const withoutDerived = (card: string) => card.split('\n').filter((line, index, lines) => {
+    const heading = lines.slice(0, index + 1).reverse().find((l) => /^#{2,3} /.test(l));
+    return !heading || !/^#{2,3} (?:Open threads|Artifacts)$/.test(heading);
+  }).join('\n');
+
+  it('keeps a model card that fits byte-identical and trims only Open threads and Artifacts to make room', () => {
+    const model = W72A_CARD;
+    const card = `${model}\n${THREADS.join('\n')}`;
+    const fits = estimateTokens(model);
+    let trimmed = 0;
+    for (let budget = fits; budget < estimateTokens(card); budget += 5) {
+      const capped = capCard(card, estimateTokens, budget, W72A_CARD_PATH);
+      expect(estimateTokens(capped), `${budget}`).toBeLessThanOrEqual(budget);
+      expect(withoutDerived(capped), `${budget}`).toBe(model);
+      if (capped !== model) trimmed += 1;
+    }
+    expect(trimmed).toBeGreaterThan(3);
+  });
+
+  it('caps a model card over the cap exactly as if Open threads and Artifacts were never there, wherever they sit', () => {
+    const top = ['# Task card', ...THREADS, ...W72A_CARD.split('\n').slice(1)].join('\n');
+    for (let budget = 150; budget < estimateTokens(W72A_CARD); budget += 25) {
+      expect(capCard(top, estimateTokens, budget, W72A_CARD_PATH), `${budget}`).toBe(capCard(W72A_CARD, estimateTokens, budget, W72A_CARD_PATH));
+    }
+  });
+
   it('ends the fewer-than-two-sections path with a marker line', () => {
     const one = `# Task card\n## Goal\n${Array.from({ length: 50 }, (_, i) => `- line ${i} of the goal with some words`).join('\n')}`;
     const card = capCard(one, estimateTokens, 120, '/p/c.md');
