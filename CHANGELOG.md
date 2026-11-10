@@ -4,7 +4,7 @@ Notable changes per version. `plugin/compact/CONTRACT.md` has the full behaviour
 
 ## 4.11.0 - 2026-11-10
 
-- Card cuts trim the session map and oldest constraints before budget fallback; an IDs section that alone exceeds the budget is dropped.
+- Card cuts trim the session map and oldest constraints before budget fallback; an IDs section that would push an otherwise fitting seed over budget is left out.
 
 ## 4.10.2 - 2026-10-29
 

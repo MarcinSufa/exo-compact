@@ -1365,7 +1365,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
             notice(`seed.adopted_shrunk=${adoptedBudget}`);
           }
           // 4.11.0 (S5z): old map lines can keep a card seed over budget after its other sections reach their floors.
-          if (sessionMapBody && !checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+          if (cardOn && sessionMapBody && !checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
             const over = Math.max(rendered.tokens - seedBudgetTokens, rendered.tokens + tailTokensForBudget - budgets.total, 0);
             const sessionMapTokens = Math.max(0, countTokens(sessionMapBody) - over - 50);
             sessionMapBody = sessionMapTokens === 0 ? '' : renderSessionMap(sessionMapSegments, countTokens, sessionMapTokens);
@@ -1394,15 +1394,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
             }
           }
           // 4.11.0 (S5z): only after the tail step, fold older constraints while keeping the newest rules verbatim.
-          if (!checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+          if (cardOn && !checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
             const over = Math.max(rendered.tokens - seedBudgetTokens, rendered.tokens + tailTokensForBudget - budgets.total, 0);
             const currentConstraintsTokens = countTokens(renderConstraintsSection(constraintsOverflow.rendered));
             if (currentConstraintsTokens >= CONSTRAINTS_MIN_BUDGET_TOKENS) {
               const constraintsBudgetTokens = Math.max(CONSTRAINTS_MIN_BUDGET_TOKENS, currentConstraintsTokens - over - 50);
-              constraintsOverflow = applyConstraintOverflow(constraints, countTokens, sha256, constraintsBudgetTokens);
-              seedSections = { ...seedSections, constraints: constraintsAt(adoptedBudgetUsed) };
-              rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
-              notice(`seed.constraints_shrunk=${constraintsBudgetTokens} seed.constraints_omitted=${constraintsOverflow.overflowCount}`);
+              if (constraintsBudgetTokens < currentConstraintsTokens) {
+                constraintsOverflow = applyConstraintOverflow(constraints, countTokens, sha256, constraintsBudgetTokens);
+                seedSections = { ...seedSections, constraints: constraintsAt(adoptedBudgetUsed) };
+                rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
+                notice(`seed.constraints_shrunk=${constraintsBudgetTokens} seed.constraints_omitted=${constraintsOverflow.overflowCount}`);
+              }
             }
           }
           if (recipesOn) notice(`seed.recipes=${recipesBody ? recipesBody.split('\n').filter((line) => line.startsWith('- ')).length : 0} seed.recipes_size=${recipesBody ? countTokens(recipesBody) : 0}`);
@@ -1417,14 +1419,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const tailText = tail.messages.map((message) => JSON.stringify(message)).join('\n');
           const fullIds = collectFullIds(event.messages.map((message) => JSON.stringify(message)));
           const idLines = expandShortIds(`${rendered.message.text}\n${tailText}`, fullIds).map((line) => redactCapturedText(line)).filter((line) => !line.includes('[redacted]'));
-          // 4.11.0 (S5z): the ID lookup stays when it fits, but cannot alone turn a fitting seed into a fallback.
+          // 4.11.0 (S5z): on a card cut, the ID lookup stays when it fits, but cannot alone turn a fitting seed into a fallback.
           if (idLines.length) {
             const withIds = renderSeed({ ...seedSections, ids: idLines.join('\n') }, tail.omittedCount, seedBudgetTokens, countTokens);
             const idsHeading = withIds.message.text.lastIndexOf('\n## IDs (short = full)\n');
             const stillQuoted = new Set(expandShortIds(`${idsHeading === -1 ? withIds.message.text : withIds.message.text.slice(0, idsHeading)}\n${tailText}`, fullIds));
             const keptLines = idLines.filter((line) => stillQuoted.has(line));
             const withKeptIds = keptLines.length === idLines.length ? withIds : renderSeed({ ...seedSections, ...(keptLines.length ? { ids: keptLines.join('\n') } : {}) }, tail.omittedCount, seedBudgetTokens, countTokens);
-            if (keptLines.length && !checkBudget(withKeptIds.tokens, tailTokensForBudget, budgets).ok && checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+            if (cardOn && keptLines.length && !checkBudget(withKeptIds.tokens, tailTokensForBudget, budgets).ok && checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
               notice('seed.ids_dropped_for_budget=1');
               notice('seed.ids_expanded=0');
             } else {

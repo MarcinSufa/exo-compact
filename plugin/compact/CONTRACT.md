@@ -3607,22 +3607,27 @@ auto-compact.
 
 ### S5z: a card cut over its budget trims the session map, then the oldest constraints, before falling back (4.11.0)
 
-The card seed keeps the existing shrink order through adopted rules. If it is still over, the session map is re-rendered
-with its current size minus the overrun and a 50-token margin, down to zero, which leaves the section out. A remaining
-map keeps its newest segment line or its folded pointer line. `seed.session_map_shrunk=<budget>` records the render
-budget, and `seed.session_map_dropped=1` marks a removed map. The existing `seed.session_map_size=<tokens>` remains the
-size before this step.
+The card seed keeps the existing shrink order through adopted rules. The S5z map trim, constraints trim and IDs drop run
+only when `cardOn` is true: a task card is present or the current brief is already in the last prompt. If the seed is
+still over, the session map is re-rendered with its current size minus the overrun and a 50-token margin, down to zero,
+which leaves the section out. A remaining map keeps its newest segment line; when older segments fold, it also keeps the
+pointer line for searching them with the segment filter. `seed.session_map_shrunk=<budget>` records the render budget,
+and `seed.session_map_dropped=1` marks a removed map. The existing `seed.session_map_size=<tokens>` remains the size
+before this step. The map gives way before the tail by design, so a cut the tail shrink could previously fit may now
+trim map lines first.
 
 The existing tail shrink runs next. If the seed still does not fit, `applyConstraintOverflow` runs again at a budget
 based on the section's current size, minus the remaining overrun and a 50-token margin, never below
-`CONSTRAINTS_MIN_BUDGET_TOKENS` (500). If that floor is above the current section size, the trim is skipped without
-a shrink notice. It folds the oldest constraints into the existing `[N older constraints omitted; full text in the
-transcript]` line and leaves the newest constraints verbatim. The notice is `seed.constraints_shrunk=<budget> seed.constraints_omitted=<N>`.
-Adopted rules keep the budget already chosen by their earlier shrink step. After the shrink chain, an IDs section is
-left out only when it would push an otherwise fitting seed over budget (`seed.ids_dropped_for_budget=1`).
+`CONSTRAINTS_MIN_BUDGET_TOKENS` (500). If the floor is above the current section size, or the computed budget is not
+below that size, the trim is skipped without a shrink notice. It folds the oldest constraints into the existing
+`[N older constraints omitted; full text in the transcript]` line and leaves the newest constraints verbatim when they
+fit the floor. A single constraint over 500 tokens can fold everything into the omitted line. The notice is
+`seed.constraints_shrunk=<budget> seed.constraints_omitted=<N>`. Adopted rules keep the budget already chosen by their
+earlier shrink step. After the shrink chain, an IDs section is left out only when it would push an otherwise fitting seed
+over budget (`seed.ids_dropped_for_budget=1`).
 
 The final `seed.budget_over` guard remains for content these steps cannot reduce, such as oversized
-`event.instructions`. The change follows a 15-day server measurement: 44 card cuts fell back on budget, with a median
+`event.instructions`. On ex44, there were 59 budget fallbacks from 2026-10-26 to 2026-11-08; the first 44 had a median
 overrun of 892 tokens (range 1-2,223).
 
 ### 4.9.2: pinned vectors runtime and Windows pipe name
