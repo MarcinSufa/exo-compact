@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { register } from '../compact.js';
+import { renderAdoptedFiles } from '../core/adopted.js';
 import { applyConstraintOverflow, CONSTRAINTS_MIN_BUDGET_TOKENS, extractConstraints, renderConstraintsSection } from '../core/constraints.js';
+import { SESSION_MAP_BUDGET_TOKENS, serializedTokens } from '../core/budgets.js';
 import { TASK_CARD_FILE } from '../core/task-card.js';
+import { renderSessionMap } from '../core/session-map.js';
 import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, countTokens, LEGACY_OPTIONS } from './fixtures/helpers.js';
 import type { CaptureRecord, SessionMessage } from '../core/types.js';
 import type { SessionSegment } from '../core/session-map.js';
@@ -13,14 +16,16 @@ const TIMELINE = `/home/u/.claude/exovault/recall/${sha256(SESSION)}/timeline.js
 const CARD = ['# Task card', '## Goal', 'Continue the active task.', '## Rules', '- Keep the newest constraint.', '## Acceptance checks', '- Tests pass.', '## Next step', 'Continue implementation.'].join('\n');
 const FULL_ID = 'bdbc6713-0123-4567-89ab-cdef01234567';
 
-function oldConstraints(count: number, bodyChars?: number): string {
+function oldConstraints(count: number, bodyChars?: number, shortIdReference = false): string {
   return Array.from({ length: count }, (_, index) => JSON.stringify({
     kind: 'user',
     origin: 'turn',
     producedBy: 's4-capture',
     sourceHash: sha256(`seed-trim-constraint-${index}`),
     body: { text: bodyChars === undefined
-      ? `Rule ${index}: you must keep constraint-marker-${index} aligned with the exact protocol field ${index} and preserve its stable request routing behavior through every restart and recovery cycle.`
+      ? shortIdReference && index === count - 1
+        ? `Rule ${index}: You must preserve task reference bdbc6713 and keep constraint-marker-${index} aligned with the exact protocol field ${index} through every recovery cycle.`
+        : `Rule ${index}: you must keep constraint-marker-${index} aligned with the exact protocol field ${index} and preserve its stable request routing behavior through every restart and recovery cycle.`
       : `You must preserve constraint-marker-${index} ${'x'.repeat(Math.max(0, bodyChars - `You must preserve constraint-marker-${index} `.length - 1))}.` },
   })).join('\n');
 }
@@ -34,6 +39,18 @@ function segments(count: number): SessionSegment[] {
     files: [`src/session-map-${index}.ts`, `src/compact-${index}.ts`, `tests/session-map-${index}.test.ts`],
     commits: [`4.${index}.0: preserve segment ${index}`],
   }));
+}
+
+function replaceSectionBody(seed: string, heading: string, body: string): string {
+  const headingAt = seed.indexOf(heading);
+  if (headingAt < 0) return seed;
+  const headingEnd = seed.indexOf('\n', headingAt);
+  if (headingEnd < 0) return seed;
+  const bodyStart = headingEnd + 1;
+  const nextHeading = seed.indexOf('\n\n## ', bodyStart);
+  const closing = seed.indexOf('\n\n</session-memory>', bodyStart);
+  const bodyEnd = nextHeading < 0 ? closing : closing < 0 ? nextHeading : Math.min(nextHeading, closing);
+  return bodyEnd < 0 ? seed : `${seed.slice(0, bodyStart)}${body}${seed.slice(bodyEnd)}`;
 }
 
 interface CutOptions {
@@ -51,13 +68,37 @@ interface CutOptions {
   oldContextTokens?: number;
   omittedMessages?: number;
   tailTool?: boolean;
+  keyFactCount?: number;
+  denseNotes?: boolean;
+  adoptedRules?: string;
+  idBeforePriorContext?: boolean;
+  shortIdReference?: boolean;
 }
 
-async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, mapCount = 0, cardTotal = 8000, totalBudget = 13000, lastPromptTokens = 3000, instructions, fullId = false, sessionMap = true, priorContextTokens = 0, oldContextTokens = 0, omittedMessages = 0, tailTool = false }: CutOptions = {}) {
+const ADOPTED_PATH = '/project/house-rules.md';
+const ADOPTED_AT = '2026-10-04T12:00:00.000Z';
+
+function keyFacts(count: number): string {
+  return Array.from({ length: count }, (_, index) => JSON.stringify({
+    kind: 'user',
+    origin: 'turn',
+    producedBy: 's4-capture',
+    sourceHash: sha256(`seed-trim-key-fact-${index}`),
+    body: { text: `The deployment label ${String(index).padStart(3, '0')} is RAVEN-${String(index).padStart(3, '0')} and the endpoint is relay-${index}.example.test.` },
+  })).join('\n');
+}
+
+async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, mapCount = 0, cardTotal = 8000, totalBudget = 13000, lastPromptTokens = 3000, instructions, fullId = false, sessionMap = true, priorContextTokens = 0, oldContextTokens = 0, omittedMessages = 0, tailTool = false, keyFactCount = 0, denseNotes = true, adoptedRules, idBeforePriorContext = false, shortIdReference = false }: CutOptions = {}) {
   const files = new Map<string, string>([[FLAG, '1']]);
   if (taskCard) files.set(`${CAPTURE}/${TASK_CARD_FILE}`, CARD);
-  if (constraintCount) files.set(`${CAPTURE}/segment-000001.json`, oldConstraints(constraintCount, constraintBodyChars));
+  if (constraintCount) files.set(`${CAPTURE}/segment-000001.json`, oldConstraints(constraintCount, constraintBodyChars, shortIdReference));
+  if (keyFactCount) files.set(`${CAPTURE}/segment-000002.json`, keyFacts(keyFactCount));
   if (mapCount) files.set(TIMELINE, JSON.stringify({ segments: segments(mapCount) }));
+  const adoptedEntry = adoptedRules === undefined ? undefined : { path: ADOPTED_PATH, savedPath: `${CAPTURE}/adopted/${sha256(ADOPTED_PATH).slice(0, 12)}.md`, chars: adoptedRules.length, at: ADOPTED_AT };
+  if (adoptedEntry) {
+    files.set(`${CAPTURE}/adopted.json`, JSON.stringify([adoptedEntry]));
+    files.set(`${CAPTURE}/adopted/${sha256(ADOPTED_PATH).slice(0, 12)}.md`, adoptedRules);
+  }
   const fileExists = (path: string): boolean => files.has(path) || [...files.keys()].some((file) => file.startsWith(`${path.replace(/\/$/, '')}/`));
   const lines: string[] = [];
   const $ = fakeHost({
@@ -79,7 +120,7 @@ async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, 
   const handlers: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
   register(((name: string, handler: never) => { handlers[name] = handler; return { catch: (caught: unknown) => { (handlers as Record<string, unknown>)[`${name}.catch`] = caught; } }; }) as never, {
     ...LEGACY_OPTIONS,
-    denseNotes: true,
+    denseNotes,
     recallEnabled: true,
     realTokenCount: false,
     workState: false,
@@ -98,11 +139,13 @@ async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, 
     messages.push(assistantText('o'.repeat(oldContextTokens * 4)));
     messages.push(humanPrompt('Prior context checkpoint.'));
   }
-  if (priorContextTokens) messages.push(assistantText('p'.repeat(priorContextTokens * 4)));
-  if (fullId) {
+  const addFullId = () => {
     messages.push(assistantCall('Bash', { tool_use_id: 'hidden-id-call', input: { command: 'true' } }));
     messages.push(toolResultsMessage([{ toolUseId: 'hidden-id-call', options: { text: `The stored artifact id is ${FULL_ID}.` } }]));
-  }
+  };
+  if (fullId && idBeforePriorContext) addFullId();
+  if (priorContextTokens) messages.push(assistantText('p'.repeat(priorContextTokens * 4)));
+  if (fullId && !idBeforePriorContext) addFullId();
   if (tailTool) {
     messages.push(toolResultsMessage([{ toolUseId: 'separator-call', options: { text: 'Unpaired result separates the prior context.' } }]));
     messages.push(assistantCall('Bash', { tool_use_id: 'tail-call', input: { command: 'true' } }));
@@ -111,7 +154,7 @@ async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, 
   const next = vi.fn(async () => ({ fellBack: true }) as unknown);
   const event = { trigger: 'auto', messages, ...(instructions === undefined ? {} : { instructions }) };
   const result = (await withStrippedRuntimeGlobals(() => handlers['session.compact']($, event, next))) as { messages?: SessionMessage[] };
-  return { lines, next, seed: result.messages?.[0]?.text ?? '', messages };
+  return { lines, next, seed: result.messages?.[0]?.text ?? '', messages, tailMessages: result.messages?.slice(1) ?? [], adoptedEntry };
 }
 
 describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before falling back', () => {
@@ -128,6 +171,43 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
     const log = lines.join('\n');
     expect(log).toContain('seed.task_card=0');
     expect(log).not.toMatch(/seed\.(?:session_map_shrunk|session_map_dropped|constraints_shrunk|ids_dropped_for_budget)=/);
+  });
+
+  it('falls back when IDs push an otherwise fitting no-card seed over budget', async () => {
+    const calibration = {
+      taskCard: false,
+      lastPromptTokens: 3000,
+      priorContextTokens: 10000,
+      constraintCount: 80,
+      keyFactCount: 250,
+      denseNotes: false,
+      sessionMap: false,
+      idBeforePriorContext: true,
+    };
+    let low = 6400;
+    let high = 6800;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = await cut({ ...calibration, totalBudget: middle, shortIdReference: true });
+      if (candidate.next.mock.calls.length) low = middle + 1;
+      else high = middle;
+    }
+    const totalBudget = low;
+    const baseline = await cut({ ...calibration, totalBudget, shortIdReference: true });
+    const baselineTailTokens = serializedTokens(baseline.tailMessages, countTokens);
+    const remainingBudget = totalBudget - countTokens(baseline.seed) - baselineTailTokens;
+    const addedIdSectionTokens = countTokens(`## IDs (short = full)\nbdbc6713 = ${FULL_ID}`);
+    expect(baseline.next).not.toHaveBeenCalled();
+    expect(baseline.seed).toContain('bdbc6713');
+    expect(remainingBudget).toBeGreaterThanOrEqual(0);
+    expect(remainingBudget).toBeLessThan(addedIdSectionTokens);
+
+    const { lines, next } = await cut({ ...calibration, totalBudget, shortIdReference: true, fullId: true });
+    const log = lines.join('\n');
+    expect(log).toContain('compact.fallback=budget');
+    expect(log).toContain('seed.ids_expanded=1');
+    expect(log).not.toContain('seed.ids_dropped_for_budget=1');
+    expect(next).toHaveBeenCalledOnce();
   });
 
   it('sizes an under-cap constraints trim from the section size', async () => {
@@ -180,13 +260,12 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
   });
 
   it('runs the map, tail and constraints reductions in that order', async () => {
-    // The tail shrink moves the omitted count from 9 to 10; that extra token leaves one token for the constraints step.
-    const { lines, next } = await cut({
+    const { lines, next, seed, tailMessages } = await cut({
       constraintCount: 80,
       mapCount: 80,
       cardTotal: 3500,
       lastPromptTokens: 400,
-      priorContextTokens: 40,
+      priorContextTokens: 120,
       oldContextTokens: 8000,
       omittedMessages: 7,
       instructions: `Keep instructions. ${'x '.repeat(1826)}`,
@@ -199,6 +278,77 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
     expect(tailAt).toBeGreaterThan(mapAt);
     expect(constraintsAt).toBeGreaterThan(tailAt);
     expect(log).not.toContain('compact.fallback=budget');
+    expect(next).not.toHaveBeenCalled();
+
+    const mapSize = Number(log.match(/seed\.session_map_size=(\d+)/)?.[1]);
+    const mapBudget = Number(log.match(/seed\.session_map_shrunk=(\d+)/)?.[1]);
+    const tailShrink = Number(log.match(/seed\.tail_shrunk_for_seed=(\d+)/)?.[1]);
+    const constraintsBudget = Number(log.match(/seed\.constraints_shrunk=(\d+)/)?.[1]);
+    const records = oldConstraints(80).split('\n').map((line) => JSON.parse(line)) as CaptureRecord[];
+    const constraints = extractConstraints(records, sha256);
+    const fullConstraints = renderConstraintsSection(applyConstraintOverflow(constraints, countTokens, sha256).rendered);
+    const beforeConstraintTrim = replaceSectionBody(seed, '## Constraints (history)', fullConstraints);
+    const totalBudget = Number(log.match(/seed\.budget_total=(\d+)/)?.[1]);
+    const keptTailTokens = serializedTokens(tailMessages, countTokens);
+    const overAtConstraints = Math.max(0, countTokens(beforeConstraintTrim) + keptTailTokens - totalBudget);
+    const currentConstraintsTokens = countTokens(fullConstraints);
+    const expectedConstraintsBudget = Math.max(CONSTRAINTS_MIN_BUDGET_TOKENS, currentConstraintsTokens - overAtConstraints - 50);
+    expect(mapSize - mapBudget).toBeGreaterThanOrEqual(50);
+    expect(tailShrink).toBeGreaterThanOrEqual(50);
+    expect(currentConstraintsTokens - constraintsBudget).toBeGreaterThanOrEqual(50);
+    expect(constraintsBudget).toBe(expectedConstraintsBudget);
+  });
+
+  it('sizes the map render budget from its current size and the observed seed overrun', async () => {
+    const mapCount = 80;
+    const { lines, seed, tailMessages, next } = await cut({
+      mapCount,
+      keyFactCount: 250,
+      denseNotes: false,
+      cardTotal: 3500,
+      lastPromptTokens: 1280,
+      priorContextTokens: 5000,
+    });
+    const log = lines.join('\n');
+    const mapSize = Number(log.match(/seed\.session_map_size=(\d+)/)?.[1]);
+    const mapBudget = Number(log.match(/seed\.session_map_shrunk=(\d+)/)?.[1]);
+    const initialMap = renderSessionMap(segments(mapCount), countTokens, SESSION_MAP_BUDGET_TOKENS);
+    const beforeMapTrim = replaceSectionBody(seed, '## Session map', initialMap);
+    const totalBudget = Number(log.match(/seed\.budget_total=(\d+)/)?.[1]);
+    const keptTailTokens = serializedTokens(tailMessages, countTokens);
+    const overAtMap = Math.max(0, countTokens(beforeMapTrim) + keptTailTokens - totalBudget);
+    expect(next).not.toHaveBeenCalled();
+    expect(mapSize).toBe(countTokens(initialMap));
+    expect(mapBudget).toBe(Math.max(0, mapSize - overAtMap - 50));
+    expect(mapBudget).toBeGreaterThan(0);
+    expect(mapBudget).toBeLessThan(mapSize);
+  });
+
+  it('keeps adopted rules at their earlier shrink budget when constraints shrink afterward', async () => {
+    const rules = ['# Session rules', '1. Keep each change within its stated acceptance checks.', '2. Report the result in one concise paragraph.'].join('\n');
+    const { lines, seed, next, adoptedEntry } = await cut({
+      constraintCount: 80,
+      adoptedRules: rules,
+      cardTotal: 3500,
+      lastPromptTokens: 937,
+      sessionMap: false,
+      oldContextTokens: 10000,
+      instructions: `Keep these event instructions verbatim. ${'x '.repeat(1800)}`,
+    });
+    const log = lines.join('\n');
+    const adoptedBudget = Number([...log.matchAll(/seed\.adopted_shrunk=(\d+)/g)].at(-1)?.[1]);
+    const constraintsBudget = Number(log.match(/seed\.constraints_shrunk=(\d+)/)?.[1]);
+    const constraintsStart = seed.indexOf('## Constraints (history)\n');
+    const constraintsBody = constraintsStart < 0 ? '' : seed.slice(constraintsStart + '## Constraints (history)\n'.length, seed.indexOf('\n\n## ', constraintsStart + 1) < 0 ? undefined : seed.indexOf('\n\n## ', constraintsStart + 1));
+    const adoptedFooter = 'Later user messages override these files where they conflict.';
+    const footerEnd = constraintsBody.indexOf(adoptedFooter);
+    const adoptedBlock = footerEnd < 0 ? undefined : constraintsBody.slice(0, footerEnd + adoptedFooter.length);
+    const expectedAdoptedBlock = renderAdoptedFiles([{ entry: adoptedEntry!, text: rules }], adoptedBudget, countTokens);
+    expect(log).toMatch(/seed\.adopted_shrunk=/);
+    expect(log).toMatch(/seed\.constraints_shrunk=/);
+    expect(constraintsBudget).toBeGreaterThanOrEqual(CONSTRAINTS_MIN_BUDGET_TOKENS);
+    expect(adoptedBlock).toBeDefined();
+    expect(countTokens(adoptedBlock ?? '')).toBeLessThanOrEqual(countTokens(expectedAdoptedBlock));
     expect(next).not.toHaveBeenCalled();
   });
 

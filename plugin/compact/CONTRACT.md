@@ -3626,6 +3626,10 @@ fit the floor. A single constraint over 500 tokens can fold everything into the 
 earlier shrink step. After the shrink chain, an IDs section is left out only when it would push an otherwise fitting seed
 over budget (`seed.ids_dropped_for_budget=1`).
 
+With `denseNotes: false`, the `keyFacts` section (capped at 1500 tokens by `KEY_FACTS_BUDGET_TOKENS` in
+`core/budgets.ts`) is never shrunk by this chain, so older constraints can fold while key facts stay whole on a card cut.
+This is accepted because the option is legacy and defaults to true.
+
 The final `seed.budget_over` guard remains for content these steps cannot reduce, such as oversized
 `event.instructions`. On ex44, there were 59 budget fallbacks from 2026-10-26 to 2026-11-08; the first 44 had a median
 overrun of 892 tokens (range 1-2,223).
