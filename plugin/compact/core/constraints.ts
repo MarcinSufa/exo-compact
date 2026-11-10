@@ -451,3 +451,6 @@ export function applyConstraintOverflow(
 export function renderConstraintsSection(rendered: readonly RenderedConstraintLine[]): string {
   return rendered.map((entry) => entry.line).join('\n');
 }
+
+/** 4.11.0 (S5z): the last-resort seed-budget trim still leaves the newest constraints room to be quoted. */
+export const CONSTRAINTS_MIN_BUDGET_TOKENS = 500;

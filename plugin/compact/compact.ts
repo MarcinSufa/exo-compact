@@ -1,7 +1,7 @@
 import type { On, PluginOptions, Register } from 'claude-code';
 import { checkBudget, estimateTokens, SINCE_CARD_BUDGET_TOKENS, SINCE_CARD_KEEP, REAL_TOTAL_BUDGET_TOKENS, scaledBudgets, TOTAL_BUDGET_TOKENS, tailSpillTokens, JEV_BATCH_MAX_TOKENS, JEV_PER_CALL_TIMEOUT_MS, JEV_QUERY_FIELD_MAX_TOKENS, JEV_TOTAL_BUDGET_MS, KEY_FACTS_BUDGET_TOKENS, MIN_REDUCTION_RATIO, REBUILD_THRESHOLD_TOKENS, SEED_BUDGET_TOKENS, TAIL_BUDGET_TOKENS, WORK_STATE_BUDGET_TOKENS, serializedTokens } from './core/budgets.js';
 import { extractStateUpdates, renderStateUpdates } from './core/state-updates.js';
-import { applyConstraintOverflow, extractAdoptedFileConstraints, extractConstraints, renderConstraintsSection } from './core/constraints.js';
+import { applyConstraintOverflow, CONSTRAINTS_MIN_BUDGET_TOKENS, extractAdoptedFileConstraints, extractConstraints, renderConstraintsSection } from './core/constraints.js';
 import { demoteHeadings } from './core/seed.js';
 import { cleanCapturedRecord, contentIdentity, isSecretLikePath, reconcile, redactCapturedText, redactHostPath, WATERMARK_SEQUENCE_LENGTH } from './core/extractor.js';
 import { applyForceTriggerOverride, forceTriggerOverride, routeTrigger, withFallback, withTimeout } from './core/handler.js';
@@ -859,7 +859,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const copiedPaths = new Set(adoptedFiles.map(({ entry }) => entry.path));
           const constraints = [...extractConstraints(constraintRecords, sha256, () => { skippedParagraphCount += 1; }), ...extractAdoptedFileConstraints(event.messages, sha256).filter((constraint) => constraint.sourceFile === undefined || !copiedPaths.has(constraint.sourceFile))];
           if (skippedParagraphCount > 0) notice(`seed.constraints_skipped_paragraph=${skippedParagraphCount}`);
-          const constraintsOverflow = applyConstraintOverflow(constraints, countTokens, sha256);
+          let constraintsOverflow = applyConstraintOverflow(constraints, countTokens, sha256);
           if (constraintsOverflow.overflowCount > 0) notice(`seed.constraints_overflow=${constraintsOverflow.overflowCount}`);
           const constraintsAt = (adoptedBudget: number): string => [renderAdoptedFiles(adoptedFiles, adoptedBudget, countTokens), renderConstraintsSection(constraintsOverflow.rendered)].filter(Boolean).join('\n');
           const constraintsBody = constraintsAt(adoptedBudgetTokens);
@@ -1183,12 +1183,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
           // The session map comes from timeline.json, which the recall build worker writes next to the index after
           // every build (per turn and at each cut), so it covers the session up to the last build.
           let sessionMapBody = '';
+          let sessionMapSegments: SessionSegment[] = [];
           if (recallEnabled && optionBoolean(options, 'sessionMap', true)) {
             try {
               const timelinePath = `${(await homeDir()) ?? '.'}/.claude/exovault/recall/${sha256(sessionId)}/timeline.json`;
               if (await $.fs.exists(timelinePath)) {
                 const timeline = JSON.parse(await $.fs.read(timelinePath)) as { segments?: SessionSegment[] };
-                sessionMapBody = Array.isArray(timeline.segments) ? renderSessionMap(timeline.segments, countTokens) : '';
+                sessionMapSegments = Array.isArray(timeline.segments) ? timeline.segments : [];
+                sessionMapBody = renderSessionMap(sessionMapSegments, countTokens);
               }
               notice(`seed.session_map_size=${countTokens(sessionMapBody)}`);
             } catch { sessionMapBody = ''; notice('seed.session_map=error'); }
@@ -1283,7 +1285,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           // 3.32.1 (CONTRACT S4zf): never-reduced sections can sum past the budget (t3: dense notes plus a full brief
           // checklist), which threw `budget` and handed 3 of 7 cuts to native compaction. The brief shrinks to fit;
           // at worst it keeps only its path lines.
-          const tailTokensForBudget = serializedTokens(tail.messages, countTokens);
+          let tailTokensForBudget = serializedTokens(tail.messages, countTokens);
           // 3.47.0 (CONTRACT S4zu): with the card the working notes shrink first (they are picked from the history the
           // card and the index already cover), down to none, before the brief path lines and the adopted rules.
           // 3.55.0: so do they ahead of a whole brief, the current task's specification (w60o: the brief went whole
@@ -1354,11 +1356,24 @@ export const register: Register = (on: On, options: PluginOptions) => {
           // 3.57.0: after the card, not before it. The user's own rules file is what the card's Rules section paraphrases
           // and trims (w17 w61e: every card cut quoted the house rules as a path only and the card kept 2 of its 10 Rules
           // lines, so the r3 and r2 reports lost the `SLICE <id> DONE` header).
+          let adoptedBudgetUsed = adoptedBudgetTokens;
           for (const adoptedBudget of adoptedFiles.length ? [Math.floor(adoptedBudgetTokens / 2), 0] : []) {
             if (checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) break;
+            adoptedBudgetUsed = adoptedBudget;
             seedSections = { ...seedSections, constraints: constraintsAt(adoptedBudget) };
             rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
             notice(`seed.adopted_shrunk=${adoptedBudget}`);
+          }
+          // 4.11.0 (S5z): old map lines can keep a card seed over budget after its other sections reach their floors.
+          if (sessionMapBody && !checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+            const over = Math.max(rendered.tokens - seedBudgetTokens, rendered.tokens + tailTokensForBudget - budgets.total, 0);
+            const sessionMapTokens = Math.max(0, countTokens(sessionMapBody) - over - 50);
+            sessionMapBody = sessionMapTokens === 0 ? '' : renderSessionMap(sessionMapSegments, countTokens, sessionMapTokens);
+            const { sessionMap: _dropped, ...withoutSessionMap } = seedSections;
+            seedSections = sessionMapBody ? { ...withoutSessionMap, sessionMap: sessionMapBody } : withoutSessionMap;
+            rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
+            notice(`seed.session_map_shrunk=${sessionMapTokens}`);
+            if (!sessionMapBody) notice('seed.session_map_dropped=1');
           }
           // 4.6.0: a seed still over its budget after every shrink above takes the missing tokens from the kept tail (down to
           // the brief floor) before the cut falls back to the native summary (w65b: seed 5289/5000, tail 7082/7082).
@@ -1370,11 +1385,24 @@ export const register: Register = (on: On, options: PluginOptions) => {
               const smallerTokens = serializedTokens(smaller.messages, countTokens);
               if (smallerTokens <= keptTokens - over) {
                 tail = smaller;
+                tailTokensForBudget = smallerTokens;
                 budgets = { ...budgets, seed: budgets.seed + budgets.tail - (keptTokens - over), tail: keptTokens - over };
                 seedBudgetTokens = budgets.seed + tailSpillTokens(smallerTokens, budgets.tail);
                 rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
                 notice(`seed.tail_shrunk_for_seed=${over}`);
               }
+            }
+          }
+          // 4.11.0 (S5z): only after the tail step, fold older constraints while keeping the newest rules verbatim.
+          if (!checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+            const over = Math.max(rendered.tokens - seedBudgetTokens, rendered.tokens + tailTokensForBudget - budgets.total, 0);
+            const currentConstraintsTokens = countTokens(renderConstraintsSection(constraintsOverflow.rendered));
+            if (currentConstraintsTokens >= CONSTRAINTS_MIN_BUDGET_TOKENS) {
+              const constraintsBudgetTokens = Math.max(CONSTRAINTS_MIN_BUDGET_TOKENS, currentConstraintsTokens - over - 50);
+              constraintsOverflow = applyConstraintOverflow(constraints, countTokens, sha256, constraintsBudgetTokens);
+              seedSections = { ...seedSections, constraints: constraintsAt(adoptedBudgetUsed) };
+              rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
+              notice(`seed.constraints_shrunk=${constraintsBudgetTokens} seed.constraints_omitted=${constraintsOverflow.overflowCount}`);
             }
           }
           if (recipesOn) notice(`seed.recipes=${recipesBody ? recipesBody.split('\n').filter((line) => line.startsWith('- ')).length : 0} seed.recipes_size=${recipesBody ? countTokens(recipesBody) : 0}`);
@@ -1389,13 +1417,20 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const tailText = tail.messages.map((message) => JSON.stringify(message)).join('\n');
           const fullIds = collectFullIds(event.messages.map((message) => JSON.stringify(message)));
           const idLines = expandShortIds(`${rendered.message.text}\n${tailText}`, fullIds).map((line) => redactCapturedText(line)).filter((line) => !line.includes('[redacted]'));
+          // 4.11.0 (S5z): the ID lookup stays when it fits, but cannot alone turn a fitting seed into a fallback.
           if (idLines.length) {
             const withIds = renderSeed({ ...seedSections, ids: idLines.join('\n') }, tail.omittedCount, seedBudgetTokens, countTokens);
             const idsHeading = withIds.message.text.lastIndexOf('\n## IDs (short = full)\n');
             const stillQuoted = new Set(expandShortIds(`${idsHeading === -1 ? withIds.message.text : withIds.message.text.slice(0, idsHeading)}\n${tailText}`, fullIds));
             const keptLines = idLines.filter((line) => stillQuoted.has(line));
-            rendered = keptLines.length === idLines.length ? withIds : renderSeed({ ...seedSections, ...(keptLines.length ? { ids: keptLines.join('\n') } : {}) }, tail.omittedCount, seedBudgetTokens, countTokens);
-            notice(`seed.ids_expanded=${keptLines.length}`);
+            const withKeptIds = keptLines.length === idLines.length ? withIds : renderSeed({ ...seedSections, ...(keptLines.length ? { ids: keptLines.join('\n') } : {}) }, tail.omittedCount, seedBudgetTokens, countTokens);
+            if (keptLines.length && !checkBudget(withKeptIds.tokens, tailTokensForBudget, budgets).ok && checkBudget(rendered.tokens, tailTokensForBudget, budgets).ok) {
+              notice('seed.ids_dropped_for_budget=1');
+              notice('seed.ids_expanded=0');
+            } else {
+              rendered = withKeptIds;
+              notice(`seed.ids_expanded=${keptLines.length}`);
+            }
           }
           const messages = [rendered.message, ...tail.messages];
           const tokensAfter = serializedTokens(messages, countTokens);

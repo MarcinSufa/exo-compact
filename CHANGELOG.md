@@ -2,6 +2,10 @@
 
 Notable changes per version. `plugin/compact/CONTRACT.md` has the full behavioural rules, one section per version.
 
+## 4.11.0 - 2026-11-10
+
+- Card cuts trim the session map and oldest constraints before budget fallback; an IDs section that alone exceeds the budget is dropped.
+
 ## 4.10.2 - 2026-10-29
 
 - `setup.cjs doctor` reads a settings file, `installed_plugins.json` or `known_marketplaces.json` saved with a UTF-8
