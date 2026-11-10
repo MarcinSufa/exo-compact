@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { register } from '../compact.js';
 import { renderAdoptedFiles } from '../core/adopted.js';
+import { BRIEF_MIN_TAIL_SHARE } from '../core/briefs.js';
 import { applyConstraintOverflow, CONSTRAINTS_MIN_BUDGET_TOKENS, extractConstraints, renderConstraintsSection } from '../core/constraints.js';
-import { SESSION_MAP_BUDGET_TOKENS, serializedTokens } from '../core/budgets.js';
+import { SESSION_MAP_BUDGET_TOKENS, serializedTokens, tailSpillTokens } from '../core/budgets.js';
 import { TASK_CARD_FILE } from '../core/task-card.js';
 import { renderSessionMap } from '../core/session-map.js';
 import { fakeHost, humanPrompt, assistantText, assistantCall, toolResultsMessage, withStrippedRuntimeGlobals, sha256, countTokens, LEGACY_OPTIONS } from './fixtures/helpers.js';
@@ -259,44 +260,82 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
     expect(map).toContain('S79:');
   });
 
-  it('runs the map, tail and constraints reductions in that order', async () => {
-    const { lines, next, seed, tailMessages } = await cut({
+  it('shrinks the map before the tail when both reductions are needed', async () => {
+    const { lines, next } = await cut({
       constraintCount: 80,
       mapCount: 80,
-      cardTotal: 3500,
-      lastPromptTokens: 400,
+      cardTotal: 8000,
+      lastPromptTokens: 1500,
       priorContextTokens: 120,
-      oldContextTokens: 8000,
-      omittedMessages: 7,
-      instructions: `Keep instructions. ${'x '.repeat(1826)}`,
+      oldContextTokens: 15000,
+      omittedMessages: 200,
+      instructions: `Keep instructions. ${'x '.repeat(8500)}`,
     });
     const log = lines.join('\n');
     const mapAt = log.indexOf('seed.session_map_shrunk=');
     const tailAt = log.indexOf('seed.tail_shrunk_for_seed=');
-    const constraintsAt = log.indexOf('seed.constraints_shrunk=');
     expect(mapAt).toBeGreaterThanOrEqual(0);
     expect(tailAt).toBeGreaterThan(mapAt);
-    expect(constraintsAt).toBeGreaterThan(tailAt);
-    expect(log).not.toContain('compact.fallback=budget');
+    expect(log).not.toContain('seed.constraints_shrunk=');
+    expect(log).not.toContain('compact.fallback=');
     expect(next).not.toHaveBeenCalled();
+  });
 
-    const mapSize = Number(log.match(/seed\.session_map_size=(\d+)/)?.[1]);
-    const mapBudget = Number(log.match(/seed\.session_map_shrunk=(\d+)/)?.[1]);
-    const tailShrink = Number(log.match(/seed\.tail_shrunk_for_seed=(\d+)/)?.[1]);
+  it('shrinks the tail before constraints when the tail can absorb the overrun', async () => {
+    const { lines, next } = await cut({
+      constraintCount: 80,
+      cardTotal: 8000,
+      lastPromptTokens: 500,
+      priorContextTokens: 2000,
+      oldContextTokens: 15000,
+      omittedMessages: 200,
+      instructions: `Keep instructions. ${'x '.repeat(9000)}`,
+    });
+    const log = lines.join('\n');
+    expect(log).toMatch(/seed\.tail_shrunk_for_seed=/);
+    expect(log).not.toContain('seed.constraints_shrunk=');
+    expect(log).not.toContain('compact.fallback=');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('shrinks constraints when the tail cannot absorb the overrun above its floor', async () => {
+    const constraintCount = 80;
+    const { lines, next, seed, tailMessages } = await cut({
+      constraintCount,
+      cardTotal: 2500,
+      lastPromptTokens: 937,
+      sessionMap: false,
+      oldContextTokens: 8000,
+      instructions: `Keep instructions. ${'x '.repeat(1200)}`,
+    });
+    const log = lines.join('\n');
     const constraintsBudget = Number(log.match(/seed\.constraints_shrunk=(\d+)/)?.[1]);
-    const records = oldConstraints(80).split('\n').map((line) => JSON.parse(line)) as CaptureRecord[];
+    const records = oldConstraints(constraintCount).split('\n').map((line) => JSON.parse(line)) as CaptureRecord[];
     const constraints = extractConstraints(records, sha256);
     const fullConstraints = renderConstraintsSection(applyConstraintOverflow(constraints, countTokens, sha256).rendered);
     const beforeConstraintTrim = replaceSectionBody(seed, '## Constraints (history)', fullConstraints);
-    const totalBudget = Number(log.match(/seed\.budget_total=(\d+)/)?.[1]);
     const keptTailTokens = serializedTokens(tailMessages, countTokens);
-    const overAtConstraints = Math.max(0, countTokens(beforeConstraintTrim) + keptTailTokens - totalBudget);
+    const totalBudget = Number(log.match(/seed\.budget_total=(\d+)/)?.[1]);
+    const seedBudget = Number(log.match(/seed\.budget_split seed=(\d+)/)?.[1]);
+    const tailBudget = Number(log.match(/seed\.budget_split seed=\d+ tail=(\d+)/)?.[1]);
+    const effectiveTailBudget = Math.max(tailBudget, keptTailTokens);
+    const effectiveTotalBudget = totalBudget + effectiveTailBudget - tailBudget;
+    const overAtConstraints = Math.max(
+      countTokens(beforeConstraintTrim) - seedBudget - tailSpillTokens(keptTailTokens, effectiveTailBudget),
+      countTokens(beforeConstraintTrim) + keptTailTokens - effectiveTotalBudget,
+      0,
+    );
     const currentConstraintsTokens = countTokens(fullConstraints);
     const expectedConstraintsBudget = Math.max(CONSTRAINTS_MIN_BUDGET_TOKENS, currentConstraintsTokens - overAtConstraints - 50);
-    expect(mapSize - mapBudget).toBeGreaterThanOrEqual(50);
-    expect(tailShrink).toBeGreaterThanOrEqual(50);
-    expect(currentConstraintsTokens - constraintsBudget).toBeGreaterThanOrEqual(50);
+    const tailFloor = Math.round(tailBudget * BRIEF_MIN_TAIL_SHARE);
+    expect(log).not.toContain('seed.session_map_shrunk=');
+    expect(log).not.toContain('seed.tail_shrunk_for_seed=');
+    expect(seed).not.toContain('## Session map');
+    expect(keptTailTokens - overAtConstraints).toBeLessThan(tailFloor);
+    expect(log).toMatch(/seed\.constraints_shrunk=\d+ seed\.constraints_omitted=\d+/);
     expect(constraintsBudget).toBe(expectedConstraintsBudget);
+    expect(log).not.toContain('compact.fallback=');
+    expect(next).not.toHaveBeenCalled();
   });
 
   it('sizes the map render budget from its current size and the observed seed overrun', async () => {
@@ -348,7 +387,7 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
     expect(log).toMatch(/seed\.constraints_shrunk=/);
     expect(constraintsBudget).toBeGreaterThanOrEqual(CONSTRAINTS_MIN_BUDGET_TOKENS);
     expect(adoptedBlock).toBeDefined();
-    expect(countTokens(adoptedBlock ?? '')).toBeLessThanOrEqual(countTokens(expectedAdoptedBlock));
+    expect(adoptedBlock).toBe(expectedAdoptedBlock);
     expect(next).not.toHaveBeenCalled();
   });
 
