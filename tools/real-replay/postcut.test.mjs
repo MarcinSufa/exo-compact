@@ -261,6 +261,8 @@ test('refreshes go to the next cut and a notice after the final boundary is unas
     event('user', { timestamp: '2026-10-10T12:00:01.000Z', message: { content: '[[exovault:s4-seed:v1]] first' } }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:20.000Z', content: 'exo-compact: task_card.refresh=start ctx=12000 window=250000 n=2' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:21.000Z', content: 'exo-compact: task_card.refresh=written size=220' }),
     boundary('2026-10-10T12:01:00.000Z'),
     event('user', {
       timestamp: '2026-10-10T12:01:01.000Z',
@@ -269,28 +271,35 @@ test('refreshes go to the next cut and a notice after the final boundary is unas
     }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:20.000Z', content: 'exo-compact: task_card.refresh=start ctx=40000 window=250000 n=3' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:21.000Z', content: 'exo-compact: task_card.refresh=written size=300' }),
     boundary('2026-10-10T12:02:00.000Z'),
     event('user', { timestamp: '2026-10-10T12:02:01.000Z', message: { content: '[[exovault:s4-seed:v1]] third' } }),
-    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=30000 window=250000 n=3' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=30000 window=250000 n=4' }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    // An unpaired write must not reuse the preceding successful start.
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:12.000Z', content: 'exo-compact: task_card.refresh=written size=500' }),
   ]);
   try {
     const run = analyze(root, reportPath);
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-    assert.equal(report.cardRefreshApproximateEstimate.n, 3);
+    assert.equal(report.cardRefreshApproximateEstimate.n, 5);
     assert.equal(report.cardRefreshApproximateEstimate.sessionsWithNotices, 1);
     assert.equal(report.cardRefreshByCut.cutsInNoticeSessions, 2);
     assert.equal(report.cardRefreshByCut.cutsWithRecordedRefreshes, 1);
-    assert.equal(report.cardRefreshByCut.refreshesAssignedToNativeCuts, 1);
+    assert.equal(report.cardRefreshByCut.refreshesAssignedToNativeCuts, 2);
     assert.deepEqual(report.cardRefreshByCut.refreshesPerCut, {
-      n: 2, median: 0.5, q1: 0.25, q3: 0.75, min: 0, max: 1,
+      n: 2, median: 1, q1: 0.5, q3: 1.5, min: 0, max: 2,
     });
     assert.deepEqual(report.cardRefreshByCut.approximateEstimatePerCut, {
-      n: 2, median: 1500, q1: 750, q3: 2250, min: 0, max: 3000,
+      n: 2, median: 4250, q1: 2125, q3: 6375, min: 0, max: 8500,
     });
     assert.deepEqual(report.cardRefreshByCut.approximateEstimatePerRefreshedCut, {
-      n: 1, median: 3000, q1: 3000, q3: 3000, min: 3000, max: 3000,
+      n: 1, median: 8500, q1: 8500, q3: 8500, min: 8500, max: 8500,
+    });
+    assert.deepEqual(report.cardRefreshByCut.refreshesPerRefreshedCut, {
+      n: 1, median: 2, q1: 2, q3: 2, min: 2, max: 2,
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
