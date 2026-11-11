@@ -22,26 +22,26 @@ Besides the gates, 5 standing session rules are checked in 7 reports, 35 checks 
 
 **Results.**
 
-| Pair | Window | Arm | Gates | Session rules (first reply · after a follow-up) | Cost | Wall time | Cuts |
+| Pair | Window | Arm | Gates | Session rules (first reply / after a follow-up) | Cost | Wall time | Cuts |
 |---|---:|---|---:|---:|---:|---:|---:|
-| 1 | 100k | plugin | 225/229 | 34/35 · 34/35 | $3.81 | 23.7 min | 7 |
-| 1 | 100k | native | 220/229 | 34/35 · 35/35 | $4.01 | 29.6 min | 7 |
-| 2 | 100k | plugin | 223/229 | 34/35 · 34/35 | $3.78 | 24.1 min | 7 |
-| 2 | 100k | native | 219/229 | 30/35 · 30/35 | $3.91 | 33.0 min | 7 |
-| 3 | 100k | plugin | 225/229 | 33/35 · 34/35 | $4.18 | 23.0 min | 7 |
-| 3 | 100k | native | 224/229 | 33/35 · 35/35 | $4.08 | 42.3 min | 7 |
-| 4 | 100k | plugin | 222/229 | 35/35 · 35/35 | $3.85 | 24.8 min | 7 |
-| 4 | 100k | native | 223/229 | 25/35 · 27/35 | $4.36 | 30.9 min | 8 |
-| 5 | 100k | plugin | 222/229 | 35/35 · 35/35 | $4.33 | 24.4 min | 8 |
-| 5 | 100k | native | 219/229 | 30/35 · 30/35 | $5.35 | 35.4 min | 10 |
-| 6 | 100k | plugin | 226/229 | 35/35 · 35/35 | $4.70 | 27.6 min | 9 |
-| 6 | 100k | native | 222/229 | 35/35 · 35/35 | $4.91 | 33.1 min | 8 |
-| 7 | 100k | plugin | 224/229 | 34/35 · 34/35 | $4.37 | 24.0 min | 8 |
-| 7 | 100k | native | 222/229 | 35/35 · 35/35 | $4.77 | 32.5 min | 8 |
-| 8 | 100k | plugin | 221/229 | 35/35 · 35/35 | $4.58 | 29.8 min | 8 |
-| 8 | 100k | native | 212/229 | 35/35 · 35/35 | $4.28 | 31.4 min | 7 |
-| 9 | 100k | plugin | 218/229 | 35/35 · 35/35 | $4.31 | 26.4 min | 8 |
-| 9 | 100k | native | 226/229 | 31/35 · 31/35 | $4.75 | 31.9 min | 8 |
+| 1 | 100k | plugin | 225/229 | 34/35 / 34/35 | $3.81 | 23.7 min | 7 |
+| 1 | 100k | native | 220/229 | 34/35 / 35/35 | $4.01 | 29.6 min | 7 |
+| 2 | 100k | plugin | 223/229 | 34/35 / 34/35 | $3.78 | 24.1 min | 7 |
+| 2 | 100k | native | 219/229 | 30/35 / 30/35 | $3.91 | 33.0 min | 7 |
+| 3 | 100k | plugin | 225/229 | 33/35 / 34/35 | $4.18 | 23.0 min | 7 |
+| 3 | 100k | native | 224/229 | 33/35 / 35/35 | $4.08 | 42.3 min | 7 |
+| 4 | 100k | plugin | 222/229 | 35/35 / 35/35 | $3.85 | 24.8 min | 7 |
+| 4 | 100k | native | 223/229 | 25/35 / 27/35 | $4.36 | 30.9 min | 8 |
+| 5 | 100k | plugin | 222/229 | 35/35 / 35/35 | $4.33 | 24.4 min | 8 |
+| 5 | 100k | native | 219/229 | 30/35 / 30/35 | $5.35 | 35.4 min | 10 |
+| 6 | 100k | plugin | 226/229 | 35/35 / 35/35 | $4.70 | 27.6 min | 9 |
+| 6 | 100k | native | 222/229 | 35/35 / 35/35 | $4.91 | 33.1 min | 8 |
+| 7 | 100k | plugin | 224/229 | 34/35 / 34/35 | $4.37 | 24.0 min | 8 |
+| 7 | 100k | native | 222/229 | 35/35 / 35/35 | $4.77 | 32.5 min | 8 |
+| 8 | 100k | plugin | 221/229 | 35/35 / 35/35 | $4.58 | 29.8 min | 8 |
+| 8 | 100k | native | 212/229 | 35/35 / 35/35 | $4.28 | 31.4 min | 7 |
+| 9 | 100k | plugin | 218/229 | 35/35 / 35/35 | $4.31 | 26.4 min | 8 |
+| 9 | 100k | native | 226/229 | 31/35 / 31/35 | $4.75 | 31.9 min | 8 |
 
 | Per chain | exo-compact | Native compaction |
 |---|---:|---:|
@@ -228,66 +228,80 @@ the measured sessions gives (45k + 218k) / 2 = 131k, against 135k measured.
 
 ## Post-cut size and cost per turn
 
-Measured from local transcripts dated 2026-10-01 onward: 620 exo-compact cuts in 122 sessions and
-159 native cuts in 25 sessions. These are transcript observations, not a controlled comparison.
+The scan read 2,951 local transcript files. Parent-session cuts dated 2026-10-01 onward only:
+623 exo-compact cuts in 122 sessions and 159 native cuts in 25 sessions. These are transcript
+observations, not a controlled comparison.
 
 **Post-cut context and boundary metadata.** Each cell gives `n`, median, IQR, and range in tokens.
 
 | | Sessions / cuts | First-call context | `preTokens` | `postTokens` |
 |---|---:|---:|---:|---:|
-| exo-compact | 122 / 620 | n=614; 45,028; 41,626-52,061; 20,596-81,790 | n=620; 217,507; 217,006-218,183; 28,086-260,191 | n=620; 5,017; 4,231-5,324; 489-21,396 |
-| Native | 25 / 159 | n=155; 65,436; 56,524-77,618; 16,413-209,687 | n=159; 217,413; 216,892-218,573; 22,392-230,972 | n=159; 17,926; 13,662-22,601; 1,351-35,636 |
+| exo-compact | 122 / 623 | n=617; 44,985; 41,608-52,047; 20,596-81,790 | n=623; 217,509; 217,006-218,180; 28,086-260,191 | n=623; 5,016; 4,232-5,321; 489-21,396 |
+| Native | 25 / 159 | n=155; 65,436; 56,524-77,535; 16,924-99,724 | n=159; 217,413; 216,892-218,573; 22,392-230,972 | n=159; 17,926; 13,662-22,601; 1,351-35,636 |
 
 **Cumulative cost after the cut.** These are input-token equivalents for the first 1, 5, or 20
-assistant calls, not a per-call average. Dollar medians use $5 per million equivalents.
+assistant calls, not a per-call average. The table uses the 100k-350k `preTokens` proxy band.
+Dollar medians use $5 per million equivalents.
 
 | Kind | Calls | n cuts | Median equivalents (median $) | IQR | Range |
 |---|---:|---:|---:|---:|---:|
-| exo-compact | 1 | 577 | 29,836 ($0.149) | 23,241-37,956 | 13,696-73,295 |
-| exo-compact | 5 | 575 | 81,482 ($0.407) | 69,621-94,251 | 48,399-243,221 |
-| exo-compact | 20 | 566 | 272,094 ($1.360) | 240,146-313,751 | 173,118-648,820 |
-| Native | 1 | 151 | 59,849 ($0.299) | 48,032-69,840 | 27,454-99,788 |
-| Native | 5 | 151 | 112,952 ($0.565) | 92,587-132,241 | 64,252-371,045 |
-| Native | 20 | 149 | 335,386 ($1.677) | 282,827-383,660 | 190,299-681,834 |
+| exo-compact | 1 | 580 | 44,574 ($0.223) | 34,419-57,854 | 19,695-113,520 |
+| exo-compact | 5 | 578 | 109,298 ($0.546) | 91,153-126,100 | 62,295-344,178 |
+| exo-compact | 20 | 568 | 319,744 ($1.599) | 280,194-373,137 | 196,179-775,554 |
+| Native | 1 | 151 | 92,993 ($0.465) | 73,989-108,300 | 41,741-149,492 |
+| Native | 5 | 151 | 153,696 ($0.768) | 122,671-180,137 | 83,305-430,943 |
+| Native | 20 | 149 | 392,584 ($1.963) | 332,502-455,835 | 218,641-980,335 |
 
-The cost table uses cuts in the 200k proxy band below to keep both sides at the same observed
-pre-cut scale. In that group, first-call context was n=577, median 45,685 (IQR 42,322-52,648;
-range 22,874-81,790) for exo-compact, and n=151, median 65,582 (IQR 57,034-77,882; range
-43,357-209,687) for native.
+In this proxy band, first-call context was n=580, median 45,657 (IQR 42,303-52,634; range
+22,874-81,790) for exo-compact, and n=151, median 65,582 (IQR 57,034-77,618; range
+43,357-99,724) for native.
 
-**Window groups.** Configured window size is not consistently recorded, so these are pre-cut-token
-bands, not verified settings.
+**Pre-cut proxy groups.** Configured window size is not consistently recorded, so these are
+pre-cut-token bands, not verified settings.
 
-| Pre-cut proxy | exo-compact cuts (sessions) | Native cuts (sessions) |
+| `preTokens` band | exo-compact cuts (sessions) | Native cuts (sessions) |
 |---|---:|---:|
-| 200k (100k-350k `preTokens`) | 577 (100) | 151 (17) |
-| 1M (at least 500k `preTokens`) | 0 (0) | 0 (0) |
+| 100k-350k proxy | 580 (100) | 151 (17) |
+| At least 500k proxy | 0 (0) | 0 (0) |
 | Other | 43 (22) | 8 (8) |
 
-No cut in this sample reached 500k `preTokens`, so there is no measured 1M post-cut result.
+No cut in this sample reached 500k `preTokens`, so there is no measured 1M post-cut result. The
+proxy-band cuts are clustered within sessions, so the IQRs describe cuts rather than independent
+sessions.
 
-**Cost of the cut and break-even.** The seed itself needs no model call. Four available subagent
-transcripts were tagged by the task-card refresh prompt; this is not a count of all card refreshes.
-Their total cost per fork was n=4, median 223,459
-equivalents ($1.12), IQR 107,708-421,294 ($0.54-$2.11), range 22,776-752,480 ($0.11-$3.76).
-The native transcripts contain no tagged assistant usage for the summary call (n=0), so its cost
-and the difference between the two cut costs are unknown. Although the observed 200k medians show
-lower post-cut usage for exo-compact, a turn-count break-even cannot be measured without the native
-summary cost; dividing by the unpaired post-cut medians would imply a precision this data does not
-support.
+**Cut cost and bounded break-even.** Native summary-call API usage is not recorded in the
+transcripts. Its compact-summary text is present in 156 native records; characters divided by four
+estimates output tokens, with n=156, median 3,782, IQR 3,311-4,474, and range 492-6,602.
+Using the optimistic assumption that the call reads all `preTokens` as cache reads, the native
+summary-call lower bound is `0.1 x preTokens + 5 x estimated output tokens`: n=156, median 40,453,
+IQR 38,051-43,949, and range 5,644-53,672 equivalents (about $0.20 at the median). This is a
+bound, not measured billed usage.
+
+In the proxy band, the unpaired median post-cut cost gap is 48,419 equivalents after the first
+call (92,993 native minus 44,574 exo-compact). On that median comparison, the native summary-call
+lower bound is covered after 1 post-cut call, assuming no additional exo cut cost. The result is
+conditional: it excludes the unmeasured card-refresh cost and compares different sessions. Card
+refreshes run through `$.model.fork` and are not represented by transcript usage. Local capture
+notices record refresh context and written-card size, but no model usage, so card-refresh cost is
+not measured (n=0).
 
 **Method.** The analysis covered local transcripts from 2026-10-01 onward, including subagent
-transcripts for card-fork cost; only parent-session boundaries contribute to cut samples. A cut is
-classified by the seed marker in its injected message; its first non-synthetic assistant call is
-selected after that message by timestamp, and duplicate message IDs count once. Context is input,
+transcripts; only parent-session boundaries contribute to cut samples. A cut is classified by the
+seed marker in its injected message. The first non-synthetic assistant call must have a timestamp
+after the boundary and injected message; retained records with earlier timestamps are excluded,
+and duplicate message IDs count once. Recovery seed text includes injected user text and tool-result
+text within two seconds, preserving the earlier seed-named read calculation. Context is input,
 cache-write, and cache-read tokens; iteration usage is summed when present. Cost weights are input
-1, cache write 1.25, cache read 0.1, and output 5, with $5 per million equivalents. The 200k and 1M
-groups are inferred from `preTokens` bands above; remaining cuts are "other."
+1, 5-minute cache write 1.25, 1-hour cache write 2, cache read 0.1, and output 5; when cache-write
+TTL splits are absent, the write weight falls back to 1.25. Recent transcript usage shows that
+1-hour cache writes dominate, so the TTL-specific weights matter to these cost estimates. The
+dollar conversion is $5 per million equivalents. Proxy bands are inferred from `preTokens`, not
+verified settings.
 
 **Caveats.** The two kinds are different sessions doing different tasks, with a different model mix;
 this is not a controlled A/B. Some cuts lack a following assistant usage record, and fewer have 5 or
-20 calls before the next cut. Window labels are inferred, and the native summary call is not priced
-in the transcripts.
+20 calls before the next cut. Window labels are inferred. The break-even compares unpaired median
+post-cut costs and a lower bound; the card-refresh cost remains unmeasured.
 
 ## Earlier measurements
 

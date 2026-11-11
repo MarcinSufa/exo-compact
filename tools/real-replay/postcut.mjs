@@ -4,19 +4,20 @@
 //
 //   node tools/real-replay/postcut.mjs [--since 2026-10-01] [--json aggregate.json] <transcript-or-directory>...
 //
-// Cost units: input 1, cache write 1.25, cache read 0.1, output 5; PRICE_PER_MTOK (default 5)
-// converts input-token equivalents to dollars. Window groups are inferred from preTokens because
-// Claude Code transcript records do not consistently store the configured context window.
+// Cost units: input 1, 5-minute cache write 1.25, 1-hour cache write 2, cache read 0.1,
+// output 5. If cache-write TTL splits are absent, cache writes use 1.25. PRICE_PER_MTOK
+// (default 5) converts input-token equivalents to dollars. Window groups are inferred from
+// preTokens because Claude Code transcript records do not consistently store the configured window.
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
 const SEED = '[[exovault:s4-seed:v1]]';
-const CARD_PROMPT = /The conversation context will be compacted soon\.\s*Write the task card that the compacted context will keep/i;
 const PRICE = Number(process.env.PRICE_PER_MTOK ?? 5);
 const DEFAULT_SINCE = Date.parse('2026-10-01T00:00:00Z');
 const CALL_COUNTS = [1, 5, 20];
+const CUMULATIVE_CALL_COUNTS = Array.from({ length: 20 }, (_, index) => index + 1);
 const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const SEARCH = new Set(['Grep', 'Glob']);
 const SEARCH_BASH = /(^|[;&|(]\s*)(grep|rg|find|ls|git (log|grep|ls-files))\b/;
@@ -61,12 +62,31 @@ function readUsage(e) {
     const hasIterationValue = iterations.some((iteration) => Number.isFinite(Number(iteration?.[key])));
     out[key] = hasIterationValue ? fromIterations : (Number(usage[key]) || 0);
   }
+  const iterationCreationSources = iterations.map((iteration) => iteration?.cache_creation);
+  const ttlKeys = ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'];
+  const hasIterationTtlSplit = iterationCreationSources.some((creation) => ttlKeys.some((key) => creation?.[key] != null
+    && Number.isFinite(Number(creation[key]))));
+  const creationSources = hasIterationTtlSplit ? iterationCreationSources : [usage.cache_creation];
+  const hasTtlSplit = creationSources.some((creation) => ttlKeys.some((key) => creation?.[key] != null
+    && Number.isFinite(Number(creation[key]))));
+  if (hasTtlSplit) {
+    out.cache_creation = Object.fromEntries(ttlKeys.map((key) => [key,
+      creationSources.reduce((total, creation) => total + (Number(creation?.[key]) || 0), 0),
+    ]));
+  }
   return out;
 }
 
 export function weightedUsage(usage) {
+  const cacheCreation = usage.cache_creation ?? {};
+  const hasTtlSplit = [cacheCreation.ephemeral_5m_input_tokens, cacheCreation.ephemeral_1h_input_tokens]
+    .some((value) => value != null && Number.isFinite(Number(value)));
+  const cacheWriteCost = hasTtlSplit
+    ? 1.25 * (Number(cacheCreation.ephemeral_5m_input_tokens) || 0)
+      + 2 * (Number(cacheCreation.ephemeral_1h_input_tokens) || 0)
+    : 1.25 * (usage.cache_creation_input_tokens ?? 0);
   return (usage.input_tokens ?? 0)
-    + 1.25 * (usage.cache_creation_input_tokens ?? 0)
+    + cacheWriteCost
     + 0.1 * (usage.cache_read_input_tokens ?? 0)
     + 5 * (usage.output_tokens ?? 0);
 }
@@ -89,6 +109,13 @@ function summarize(values) {
   };
 }
 
+function summarizeRecovery(values) {
+  const stats = summarize(values);
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  stats.median = sorted.length ? sorted[sorted.length >> 1] : null;
+  return stats;
+}
+
 function makeCut(e, sequence, session) {
   const metadata = e.compactMetadata ?? {};
   return {
@@ -99,7 +126,8 @@ function makeCut(e, sequence, session) {
     kind: null,
     sawUserText: false,
     injectionTime: 0,
-    seedText: '',
+    seedTextParts: [],
+    summaryTokens: null,
     preTokens: Number.isFinite(metadata.preTokens) ? metadata.preTokens : null,
     postTokens: Number.isFinite(metadata.postTokens) ? metadata.postTokens : null,
     trigger: metadata.trigger,
@@ -137,6 +165,13 @@ function finalizeCut(cut, out) {
     callCosts: cut.calls.map(weightedUsage),
   });
 
+  if (kind === 'native' && cut.summaryTokens != null) {
+    out.nativeSummaryOutput.push(cut.summaryTokens);
+    if (Number.isFinite(cut.preTokens)) {
+      out.nativeSummaryLowerBounds.push(0.1 * cut.preTokens + 5 * cut.summaryTokens);
+    }
+  }
+
   const firstWrite = cut.toolCalls.findIndex(({ tool }) => WRITE.has(tool.name));
   const win = cut.toolCalls.slice(0, firstWrite >= 0 ? Math.min(firstWrite, RECOVERY_TOOL_WINDOW) : RECOVERY_TOOL_WINDOW);
   const winIds = new Set(win.map(({ tool }) => tool.id));
@@ -171,7 +206,7 @@ function finalizeCut(cut, out) {
     trigger: cut.trigger,
     preTokens: cut.preTokens,
     continuation: cut.firstAssistantIndex != null && (cut.firstRealUserIndex == null || cut.firstAssistantIndex < cut.firstRealUserIndex),
-    seedTokens: Math.ceil(cut.seedText.length / 4),
+    seedTokens: Math.ceil(cut.seedTextParts.join('\n').length / 4),
     firstContext: recoveryContext,
     window: win.length,
     reachedWrite: firstWrite >= 0 && firstWrite < 60,
@@ -182,14 +217,14 @@ function finalizeCut(cut, out) {
     cost: Math.round(recoveryCost),
     pulledTokens: pulled,
     reads: readList.length,
-    readsNamed: readList.filter((filePath) => named(cut.seedText, filePath)).length,
+    readsNamed: readList.filter((filePath) => named(cut.seedTextParts.join('\n'), filePath)).length,
     searches: win.filter(({ tool }) => isSearch(tool)).length,
     recalls: win.filter(({ tool }) => /exovault-recall__/.test(tool.name)).length,
   });
 }
 
-function summaryTagged(e) {
-  return e.type === 'assistant' && (
+function compactSummary(e) {
+  return e.type === 'user' && (
     e.isCompactSummary === true
     || e.message?.isCompactSummary === true
     || e.message?.compactSummary === true
@@ -201,10 +236,6 @@ async function analyzeTranscript(file, since, output) {
   const subagent = isSubagentPath(file);
   let current = null;
   let sequence = 0;
-  let cardPromptSeen = false;
-  let cardCost = 0;
-  let cardCalls = new Set();
-  const taggedSummaryCalls = new Set();
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
 
   for await (const line of rl) {
@@ -214,23 +245,6 @@ async function analyzeTranscript(file, since, output) {
     sequence++;
 
     const time = eventTime(e);
-    if (subagent && e.type === 'user' && time >= since && CARD_PROMPT.test(eventText(e))) cardPromptSeen = true;
-    if (subagent && cardPromptSeen && e.type === 'assistant' && e.message?.model !== '<synthetic>') {
-      const id = e.message?.id ?? e.uuid ?? `assistant-${sequence}`;
-      if (!cardCalls.has(id)) {
-        cardCalls.add(id);
-        cardCost += weightedUsage(readUsage(e));
-      }
-    }
-
-    if (!subagent && summaryTagged(e) && time >= since && e.message?.usage) {
-      const id = e.message?.id ?? e.uuid ?? `summary-${sequence}`;
-      if (!taggedSummaryCalls.has(id)) {
-        taggedSummaryCalls.add(id);
-        output.nativeSummary.push(weightedUsage(readUsage(e)));
-      }
-    }
-
     if (subagent) continue;
     if (e.type === 'system' && e.subtype === 'compact_boundary') {
       finalizeCut(current, output);
@@ -239,16 +253,21 @@ async function analyzeTranscript(file, since, output) {
     }
     if (!current) continue;
 
-    if (e.type === 'user' && typeof eventContent(e) === 'string') {
-      const text = eventText(e);
+    if (e.type === 'user') {
       if (!current.injectionTime) current.injectionTime = time || current.time;
-      if (time && time <= current.injectionTime + 2000) current.seedText += `${current.seedText ? '\n' : ''}${text}`;
-      if (text.includes(SEED)) {
-        current.seed = true;
-        current.kind = 's4';
-      } else if (!current.kind) {
-        current.sawUserText = true;
-        current.kind = 'native';
+      if (time && time <= current.injectionTime + 2000) {
+        current.seedTextParts.push(eventText(e));
+        if (compactSummary(e)) current.summaryTokens = Math.ceil(eventText(e).length / 4);
+      }
+      if (typeof eventContent(e) === 'string') {
+        const text = eventText(e);
+        if (text.includes(SEED)) {
+          current.seed = true;
+          current.kind = 's4';
+        } else if (!current.kind) {
+          current.sawUserText = true;
+          current.kind = 'native';
+        }
       }
     }
 
@@ -270,9 +289,11 @@ async function analyzeTranscript(file, since, output) {
     }
 
     if (e.type !== 'assistant' || e.message?.model === '<synthetic>') continue;
-    if (current.injectionTime && time && time < current.injectionTime) continue;
     const id = e.message?.id ?? e.uuid ?? `assistant-${sequence}`;
-    if (!current.callIds.has(id)) {
+    // Retained assistant records can appear after the boundary line but carry an earlier timestamp.
+    // They can have zeroed top-level usage with the original values in iterations, so require a
+    // timestamp strictly after the boundary before they enter the post-cut call sample.
+    if (time && time > current.time && (!current.injectionTime || time >= current.injectionTime) && !current.callIds.has(id)) {
       current.callIds.add(id);
       if (current.calls.length < 20) current.calls.push(readUsage(e));
     }
@@ -286,7 +307,6 @@ async function analyzeTranscript(file, since, output) {
   }
 
   finalizeCut(current, output);
-  if (cardPromptSeen) output.cardRefresh.push(cardCost);
 }
 
 function cutStats(cuts) {
@@ -313,14 +333,14 @@ function recoveryStats(rows) {
   return {
     n: selected.length,
     sessions: new Set(selected.map((row) => row.session)).size,
-    seedTokens: summarize(selected.map((row) => row.seedTokens)),
-    firstContext: summarize(selected.map((row) => row.firstContext)),
+    seedTokens: summarizeRecovery(selected.map((row) => row.seedTokens)),
+    firstContext: summarizeRecovery(selected.map((row) => row.firstContext)),
     reachesEdit: { n: edit.length, denominator: selected.length },
-    toolsToEdit: summarize(edit.map((row) => row.toFirstWrite)),
-    activeSecondsToEdit: summarize(edit.map((row) => row.activeSeconds)),
-    costTokens: summarize(selected.map((row) => row.cost)),
+    toolsToEdit: summarizeRecovery(edit.map((row) => row.toFirstWrite)),
+    activeSecondsToEdit: summarizeRecovery(edit.map((row) => row.activeSeconds)),
+    costTokens: summarizeRecovery(selected.map((row) => row.cost)),
     meanCostTokens: mean(selected.map((row) => row.cost)),
-    pulledTokens: summarize(selected.map((row) => row.pulledTokens)),
+    pulledTokens: summarizeRecovery(selected.map((row) => row.pulledTokens)),
     meanSearches: mean(selected.map((row) => row.searches)),
     meanReads: mean(selected.map((row) => row.reads)),
     namedReadPercent: totalReads ? Math.round(100 * selected.reduce((sum, row) => sum + row.readsNamed, 0) / totalReads) : 0,
@@ -346,7 +366,7 @@ function recoveryReport(rows) {
   return report;
 }
 
-export function aggregatePostCuts(cuts, cutCosts, filesScanned, sinceText, recoveryRows = []) {
+export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText, recoveryRows = []) {
   const withSession = cuts;
   const kinds = ['s4', 'native'];
   const byKind = Object.fromEntries(kinds.map((kind) => [kind, cutStats(withSession.filter((cut) => cut.kind === kind))]));
@@ -354,17 +374,34 @@ export function aggregatePostCuts(cuts, cutCosts, filesScanned, sinceText, recov
   for (const group of ['200k', '1M', 'other']) {
     windows[group] = Object.fromEntries(kinds.map((kind) => [kind, cutStats(withSession.filter((cut) => cut.window === group && cut.kind === kind))]));
   }
+  const summaryOutput = summarize(summaryMetrics.nativeSummaryOutput);
+  const summaryLowerBound = summarize(summaryMetrics.nativeSummaryLowerBounds);
+  const proxyCuts = withSession.filter((cut) => cut.window === '200k');
+  const breakEvenRows = CUMULATIVE_CALL_COUNTS.map((n) => {
+    const costs = Object.fromEntries(kinds.map((kind) => {
+      const selected = proxyCuts.filter((cut) => cut.kind === kind && cut.callCosts.length >= n);
+      return [kind, summarize(selected.map((cut) => cut.callCosts.slice(0, n).reduce((sum, value) => sum + value, 0)))];
+    }));
+    const medianGap = costs.native.median == null || costs.s4.median == null
+      ? null : costs.native.median - costs.s4.median;
+    return { calls: n, s4: costs.s4, native: costs.native, medianGap };
+  });
+  const callsToCoverSummaryBound = breakEvenRows.find((row) => row.medianGap != null
+    && summaryLowerBound.median != null && row.medianGap >= summaryLowerBound.median)?.calls ?? null;
   return {
     since: sinceText,
     transcriptsScanned: filesScanned,
     pricePerMTok: PRICE,
-    windowClassification: 'inferred from compactMetadata.preTokens: 100k-350k => 200k; >=500k => 1M; otherwise other',
+    windowClassification: 'preTokens proxy bands: 100k-350k => 200k proxy; >=500k => 1M proxy; otherwise other',
     cuts: byKind,
     windows,
     recovery: recoveryReport(recoveryRows),
-    cutCosts: {
-      cardRefreshForks: { n: cutCosts.cardRefresh.length, cost: summarize(cutCosts.cardRefresh) },
-      nativeSummaryCalls: { n: cutCosts.nativeSummary.length, cost: summarize(cutCosts.nativeSummary) },
+    nativeSummaryOutputTokensEstimate: summaryOutput,
+    nativeSummaryLowerBound: summaryLowerBound,
+    breakEven: {
+      assumption: 'No measured extra exo cut cost; compare unpaired 200k proxy cohort cumulative median costs.',
+      callsToCoverNativeSummaryLowerBound: callsToCoverSummaryBound,
+      cumulativeMedianSavings: breakEvenRows,
     },
   };
 }
@@ -428,10 +465,20 @@ function printReport(report) {
     }
   }
   for (const group of ['200k', '1M', 'other']) {
-    console.log(`${group} preTokens group: s4 ${report.windows[group].s4.n} cuts; native ${report.windows[group].native.n} cuts`);
+    const label = group === '200k' ? '100k-350k preTokens proxy' : `${group} preTokens proxy`;
+    console.log(`${label}: s4 ${report.windows[group].s4.n} cuts; native ${report.windows[group].native.n} cuts`);
+    if (group === '200k') {
+      for (const kind of ['s4', 'native']) {
+        for (const n of CALL_COUNTS) {
+          const stats = report.windows[group][kind].costByCalls[String(n)];
+          console.log(`  ${kind} first ${n} calls: ${formatStats(stats)}`);
+        }
+      }
+    }
   }
-  console.log(`Tagged card-refresh fork cost: ${formatStats(report.cutCosts.cardRefreshForks.cost)} input-token equivalents per fork`);
-  console.log(`Tagged native summary-call usage: ${formatStats(report.cutCosts.nativeSummaryCalls.cost)} input-token equivalents per call`);
+  console.log(`Native compact-summary output estimate (chars / 4): ${formatStats(report.nativeSummaryOutputTokensEstimate)} tokens`);
+  console.log(`Native summary-call lower bound (0.1 x preTokens + 5 x summary estimate): ${formatStats(report.nativeSummaryLowerBound)} input-token equivalents`);
+  console.log(`200k proxy median savings cover that lower bound after ${report.breakEven.callsToCoverNativeSummaryLowerBound ?? 'more than 20'} post-cut calls, assuming no measured extra exo cut cost`);
   for (const kind of ['native', 's4']) {
     const grouped = report.recovery[kind];
     printRecovery(`${kind} recovery`, grouped.all);
@@ -446,9 +493,12 @@ function printReport(report) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const files = expandInputs(args.inputs);
-  const internal = { since: args.since, cuts: [], recovery: [], cardRefresh: [], nativeSummary: [] };
+  const internal = { since: args.since, cuts: [], recovery: [], nativeSummaryOutput: [], nativeSummaryLowerBounds: [] };
   for (const file of files) await analyzeTranscript(file, args.since, internal);
-  const report = aggregatePostCuts(internal.cuts, { cardRefresh: internal.cardRefresh, nativeSummary: internal.nativeSummary }, files.length, args.sinceText, internal.recovery);
+  const report = aggregatePostCuts(internal.cuts, {
+    nativeSummaryOutput: internal.nativeSummaryOutput,
+    nativeSummaryLowerBounds: internal.nativeSummaryLowerBounds,
+  }, files.length, args.sinceText, internal.recovery);
   if (args.jsonOut) fs.writeFileSync(args.jsonOut, `${JSON.stringify(report, null, 2)}\n`);
   printReport(report);
 }

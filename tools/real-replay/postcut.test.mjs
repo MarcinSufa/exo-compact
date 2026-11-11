@@ -4,40 +4,100 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { weightedUsage } from './postcut.mjs';
 
 const script = path.join(import.meta.dirname, 'postcut.mjs');
 const stamp = (day, second = 0) => `2026-10-${day}T12:00:${String(second).padStart(2, '0')}.000Z`;
 const event = (type, extra = {}) => ({ type, ...extra });
 
-function assistant(id, usage, at, model = 'claude-sonnet-5-5') {
-  return event('assistant', { timestamp: at, message: { id, model, usage, content: [{ type: 'text', text: 'synthetic fixture' }] } });
+function assistant(id, usage, at, model = 'claude-sonnet-5-5', content = [{ type: 'text', text: 'synthetic fixture' }]) {
+  return event('assistant', { timestamp: at, message: { id, model, usage, content } });
 }
 
 function usage(input, write, read, output) {
   return { input_tokens: input, cache_creation_input_tokens: write, cache_read_input_tokens: read, output_tokens: output };
 }
 
+function boundary(at, preTokens = 205000, postTokens = 10000) {
+  return event('system', {
+    subtype: 'compact_boundary',
+    timestamp: at,
+    compactMetadata: { trigger: 'auto', preTokens, postTokens },
+  });
+}
+
+function writeEvents(file, events) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${events.map((row) => JSON.stringify(row)).join('\n')}\n`);
+}
+
 function writeCut(dir, name, kind, day, preTokens, postTokens, perCall, useIterations = false) {
-  const events = [event('system', { subtype: 'compact_boundary', timestamp: stamp(day), compactMetadata: { trigger: 'auto', preTokens, postTokens } })];
+  const events = [boundary(stamp(day), preTokens, postTokens)];
   events.push(event('user', {
     timestamp: stamp(day, 1),
     message: { content: kind === 's4' ? '[[exovault:s4-seed:v1]] fixture seed' : 'This session is being continued from a previous conversation.' },
     ...(kind === 'native' ? { isCompactSummary: true } : {}),
   }));
   // Transcript order can place the compaction-triggering response after the boundary even though
-  // its timestamp predates the injected seed/summary. It is not a post-cut call.
+  // its timestamp predates the boundary. It is not a post-cut call.
   events.push(assistant(`${name}-precut`, usage(99999, 0, 0, 0), stamp(day)));
   const apiUsage = useIterations
     ? { ...usage(0, 0, 0, 0), iterations: [usage(...perCall)] }
     : usage(...perCall);
   events.push(assistant(`${name}-call-1`, apiUsage, stamp(day, 2)));
-  // Repeated transcript blocks for one API message must not count as a second call.
-  if (useIterations) events.push(assistant(`${name}-call-1`, apiUsage, stamp(day, 2)));
+  // This duplicate has deliberately different usage so removing ID dedup changes the totals.
+  if (useIterations) {
+    const duplicateUsage = { ...usage(0, 0, 0, 0), iterations: [usage(900, 900, 900, 900)] };
+    events.push(assistant(`${name}-call-1`, duplicateUsage, stamp(day, 2)));
+  }
   for (let n = 2; n <= 20; n++) events.push(assistant(`${name}-call-${n}`, usage(...perCall), stamp(day, n)));
-  fs.writeFileSync(path.join(dir, `${name}.jsonl`), `${events.map((row) => JSON.stringify(row)).join('\n')}\n`);
+  writeEvents(path.join(dir, `${name}.jsonl`), events);
 }
 
-test('postcut reports aggregate usage, costs, metadata, window groups, and tagged card-fork cost', () => {
+function analyze(root, reportPath, since = '2026-10-01') {
+  return spawnSync(process.execPath, [script, '--since', since, '--json', reportPath, root], { encoding: 'utf8' });
+}
+
+test('cache writes use their TTL weights and fall back when splits are absent', () => {
+  assert.equal(weightedUsage({
+    input_tokens: 2,
+    cache_creation_input_tokens: 100,
+    cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 80 },
+    cache_read_input_tokens: 10,
+    output_tokens: 3,
+  }), 203);
+  assert.equal(weightedUsage({
+    input_tokens: 2,
+    cache_creation_input_tokens: 100,
+    cache_read_input_tokens: 10,
+    output_tokens: 3,
+  }), 143);
+});
+
+test('postcut reads TTL splits from transcript usage when iterations carry only aggregate writes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-ttl-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  const usageWithSplit = {
+    ...usage(0, 0, 0, 0),
+    cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 80 },
+    iterations: [usage(2, 100, 10, 3)],
+  };
+  writeEvents(path.join(root, 'ttl.jsonl'), [
+    boundary(stamp('02')),
+    event('user', { timestamp: stamp('02', 1), message: { content: '[[exovault:s4-seed:v1]] fixture' } }),
+    assistant('ttl-call', usageWithSplit, stamp('02', 2)),
+  ]);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cuts.s4.costByCalls['1'].median, 203);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('postcut reports aggregate usage, metadata, window costs, and no transcript-derived card cost', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-fixture-'));
   const children = path.join(root, 'subagents');
   fs.mkdirSync(children);
@@ -46,16 +106,19 @@ test('postcut reports aggregate usage, costs, metadata, window groups, and tagge
   writeCut(root, 'fixture-native-a', 'native', '05', 205000, 18000, [10, 80, 500, 20]);
   writeCut(root, 'fixture-native-b', 'native', '06', 220000, 20000, [100, 200, 1000, 10]);
 
-  const fork = [
-    event('user', { timestamp: stamp('03', 9), message: { content: 'The conversation context will be compacted soon. Write the task card that the compacted context will keep.' } }),
+  const prompt = 'The conversation context will be compacted soon. Write the task card that the compacted context will keep.';
+  writeEvents(path.join(children, 'fixture-card-refresh.jsonl'), [
+    event('user', {
+      timestamp: stamp('03', 9),
+      message: { content: [{ type: 'tool_result', tool_use_id: 'read-source', content: prompt }] },
+    }),
     assistant('card-fork-call-1', usage(100, 200, 300, 40), stamp('03', 10)),
     assistant('card-fork-call-2', usage(100, 200, 300, 40), stamp('03', 11)),
-  ];
-  fs.writeFileSync(path.join(children, 'fixture-card-refresh.jsonl'), `${fork.map((row) => JSON.stringify(row)).join('\n')}\n`);
+  ]);
 
   const reportPath = path.join(root, 'aggregate.json');
   try {
-    const run = spawnSync(process.execPath, [script, '--since', '2026-10-01', '--json', reportPath, root], { encoding: 'utf8' });
+    const run = analyze(root, reportPath);
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
 
@@ -73,13 +136,121 @@ test('postcut reports aggregate usage, costs, metadata, window groups, and tagge
     assert.equal(report.windows['200k'].s4.n, 2);
     assert.equal(report.windows['200k'].native.n, 2);
     assert.equal(report.windows['1M'].s4.n, 0);
-    assert.equal(report.cutCosts.cardRefreshForks.n, 1);
-    assert.equal(report.cutCosts.cardRefreshForks.cost.median, 1160);
-    assert.equal(report.cutCosts.nativeSummaryCalls.n, 0);
+    assert.equal(report.breakEven.cumulativeMedianSavings.length, 20);
+    assert.equal('cutCosts' in report, false);
 
     const output = `${run.stdout}\n${fs.readFileSync(reportPath, 'utf8')}`;
     assert.doesNotMatch(output, /fixture-s4|fixture-native|fixture-card-refresh|postcut-fixture-/);
-    assert.doesNotMatch(output, /synthetic fixture|The conversation context/);
+    assert.doesNotMatch(output, /synthetic fixture|The conversation context|card-refresh fork cost/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a retained assistant record after the boundary line is excluded by its pre-boundary timestamp', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-boundary-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  const cutAt = '2026-10-07T12:00:00.000Z';
+  const events = [
+    boundary(cutAt),
+    event('user', {
+      timestamp: '2026-10-07T11:59:30.000Z',
+      isCompactSummary: true,
+      message: { content: 'Retained summary text.' },
+    }),
+    assistant('retained-precut', {
+      ...usage(0, 0, 0, 0),
+      iterations: [usage(99999, 90000, 80000, 70000)],
+    }, '2026-10-07T11:59:50.000Z'),
+    assistant('valid-postcut', { ...usage(0, 0, 0, 0), iterations: [usage(2, 100, 1000, 10)] }, '2026-10-07T12:00:01.000Z'),
+  ];
+  writeEvents(path.join(root, 'native.jsonl'), events);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cuts.native.n, 1);
+    assert.equal(report.cuts.native.firstContext.median, 1102);
+    assert.equal(report.cuts.native.costByCalls['1'].median, 277);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('recovery metrics include injected tool-result text when matching reads to the seed', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-recovery-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  const target = '/repo/src/recovery-target.mjs';
+  const summary = 'Please continue the previous task.';
+  const toolResult = `The retained context named ${target}.`;
+  const events = [
+    boundary(stamp('08')),
+    event('user', { timestamp: stamp('08', 1), isCompactSummary: true, message: { content: summary } }),
+    event('user', {
+      timestamp: '2026-10-08T12:00:01.500Z',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'read-target', content: toolResult }] },
+    }),
+    assistant('recovery-read', usage(10, 20, 30, 4), '2026-10-08T12:00:04.000Z', 'claude-sonnet-5-5', [
+      { type: 'tool_use', id: 'read-target', name: 'Read', input: { file_path: target } },
+    ]),
+  ];
+  writeEvents(path.join(root, 'native-recovery.jsonl'), events);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    const recovery = report.recovery.native.all;
+    assert.equal(recovery.n, 1);
+    assert.equal(recovery.seedTokens.median, Math.ceil(`${summary}\n${toolResult}`.length / 4));
+    assert.equal(recovery.namedReadPercent, 100);
+    assert.equal(recovery.costTokens.median, 58);
+    assert.equal(report.nativeSummaryOutputTokensEstimate.n, 1);
+    assert.equal(report.nativeSummaryOutputTokensEstimate.median, Math.ceil(summary.length / 4));
+    assert.equal(report.nativeSummaryLowerBound.n, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--since excludes earlier boundaries in the same transcript', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-since-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  const events = [
+    boundary('2026-09-30T23:59:59.000Z', 200000, 8000),
+    event('user', { timestamp: '2026-09-30T23:59:59.500Z', message: { content: '[[exovault:s4-seed:v1]] old' } }),
+    assistant('old-call', usage(1, 2, 3, 4), '2026-09-30T23:59:59.750Z'),
+    boundary('2026-10-01T00:00:00.000Z', 205000, 9000),
+    event('user', { timestamp: '2026-10-01T00:00:00.500Z', message: { content: '[[exovault:s4-seed:v1]] new' } }),
+    assistant('new-call', usage(2, 3, 4, 5), '2026-10-01T00:00:01.000Z'),
+  ];
+  writeEvents(path.join(root, 'two-cuts.jsonl'), events);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cuts.s4.n, 1);
+    assert.equal(report.cuts.s4.preTokens.median, 205000);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('subagent transcript boundaries are excluded from cut samples', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-subagent-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  const makeSeedCut = (name, at) => [
+    boundary(at),
+    event('user', { timestamp: new Date(Date.parse(at) + 1000).toISOString(), message: { content: '[[exovault:s4-seed:v1]] fixture' } }),
+    assistant(`${name}-call`, usage(2, 3, 4, 5), new Date(Date.parse(at) + 2000).toISOString()),
+  ];
+  writeEvents(path.join(root, 'parent.jsonl'), makeSeedCut('parent', '2026-10-09T12:00:00.000Z'));
+  writeEvents(path.join(root, 'subagents', 'worker.jsonl'), makeSeedCut('worker', '2026-10-09T12:10:00.000Z'));
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.transcriptsScanned, 2);
+    assert.equal(report.cuts.s4.n, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
