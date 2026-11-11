@@ -12,7 +12,7 @@ const INTERVALS_MINUTES = [5, 10, 20, 30];
 const MAX_NOTICE_LOG_LINES = 1500;
 const CUT_NOTICE_RE = /\bcompacted\s+\S+\s+->\s+\S+\s+tokens\s+in\s+\S+\s+s\b/;
 const CUT_NOTICE_SOURCE = 'plugin/compact/host/notices.ts:formatCutSummary';
-const READER_KINDS = ['rule_check', 'card_check', 's4_seed'];
+const READER_KINDS = ['rule_check', 'card_check', 's4_seed_fell_back'];
 
 function parseArgs(argv) {
   let root = path.join(os.homedir(), '.exovault', 's4-capture');
@@ -39,8 +39,16 @@ function findNoticeFiles(root) {
   try { stat = fs.statSync(root); } catch { throw new Error('Capture root does not exist'); }
   if (!stat.isDirectory()) throw new Error('Capture root must be a directory');
   const files = [];
+  let readErrors = 0;
   const visit = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      readErrors += 1;
+      return;
+    }
+    for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) visit(file);
@@ -48,7 +56,7 @@ function findNoticeFiles(root) {
     }
   };
   visit(root);
-  return files;
+  return { files, readErrors };
 }
 
 function parseNoticeLine(line, order) {
@@ -76,7 +84,7 @@ function parseNoticeLine(line, order) {
   if (/\bcompacted\b/.test(text)) return { type: 'unparseable', order, time };
   if (/^rule_check\.fired=[01]\s+broken=\d+\b/.test(text)) return { type: 'reader', time, order, readerKind: 'rule_check' };
   if (/^brief_check\.fired=1\s+source=card(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 'card_check' };
-  if (/\bseed\.task_card=1(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 's4_seed' };
+  if (/\bseed\.task_card=1(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 's4_seed_fell_back' };
   return undefined;
 }
 
@@ -249,8 +257,8 @@ function supersededMetric(sessions, writes, cutNoticeCount) {
     }
   }
   const allEquivalents = sum(writes.map((refresh) => refresh.equivalents));
-  const read = superseded.filter((refresh) => refresh.readers.size > 0);
-  const neverRead = superseded.filter((refresh) => refresh.readers.size === 0);
+  const read = superseded.filter((refresh) => Array.from(refresh.readers).some((kind) => kind !== 's4_seed_fell_back'));
+  const neverRead = superseded.filter((refresh) => !Array.from(refresh.readers).some((kind) => kind !== 's4_seed_fell_back'));
   const categoryMetric = (refreshes) => ({
     count: refreshes.length,
     percent_of_written_refreshes: percent(refreshes.length, writes.length),
@@ -274,14 +282,14 @@ function supersededMetric(sessions, writes, cutNoticeCount) {
     read_before_replacement: { ...categoryMetric(read), reader_kinds: readerKinds },
     never_read_before_replacement: categoryMetric(neverRead),
     reader_kind_counts_overlap: true,
-    definition: 'A written card is superseded when another card is written before the next recorded cut summary. A reader is counted when its notice falls after that card was written and before it was replaced.',
+    definition: 'A written card is superseded when another card is written before the next recorded cut summary. A seed.task_card=1 notice without a cut summary before replacement is classified as s4_seed_fell_back and does not count as a read unless another reader notice exists.',
   };
 }
 
 export function analyzeCardRefreshRate(root, sinceText = DEFAULT_SINCE) {
   const since = Date.parse(sinceText);
   if (!Number.isFinite(since)) throw new Error('--since must be a valid ISO date or timestamp');
-  const files = findNoticeFiles(root);
+  const { files, readErrors: directoryReadErrors } = findNoticeFiles(root);
   const sessions = files.map((file) => readSession(file, since));
   for (const session of sessions) {
     for (const start of session.starts) start.session = session;
@@ -297,7 +305,7 @@ export function analyzeCardRefreshRate(root, sinceText = DEFAULT_SINCE) {
     writes_without_start: total.writes_without_start + session.dropped.writes_without_start,
     unparseable_lines: total.unparseable_lines + session.dropped.unparseable_lines,
   }), { orphan_starts: 0, writes_without_start: 0, unparseable_lines: 0 });
-  const readErrors = sessions.filter((session) => session.unreadable).length;
+  const readErrors = directoryReadErrors + sessions.filter((session) => session.unreadable).length;
   const lineCapFiles = sessions.filter((session) => session.atLineCap).length;
   const superseded = supersededMetric(sessions, writes, cutNoticeCount);
   const metrics = {
@@ -370,7 +378,7 @@ function printReport(report) {
   const failed = report.metrics.failed_refreshes;
   process.stdout.write(`Failed: ${failed.count}/${failed.n_starts} starts (${formatPercent(failed.percent)})\n`);
   process.stdout.write(`Dropped: ${report.dropped.count} total; ${report.dropped.orphan_starts} orphan starts, ${report.dropped.writes_without_start} writes without a start, ${report.dropped.unparseable_lines} unparseable lines\n`);
-  process.stdout.write(`notices.log files at 1500-line cap: ${report.notices_files_at_line_cap}; per-file read errors: ${report.file_read_errors}\n`);
+  process.stdout.write(`notices.log files at 1500-line cap: ${report.notices_files_at_line_cap}; read errors: ${report.file_read_errors}\n`);
   process.stdout.write(`Cut notice: ${report.cut_notice.pattern}; source ${report.cut_notice.source}; ${report.cut_notice.observed_since} observed\n`);
 }
 

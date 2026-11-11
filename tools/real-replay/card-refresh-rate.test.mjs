@@ -274,7 +274,7 @@ test('a card acceptance check counts as a read before replacement', () => {
   }
 });
 
-test('an S4 seed counts as a read even when the seed falls back on budget', () => {
+test('an S4 seed that falls back does not count as a read before replacement', () => {
   const root = fixture([
     start(0), written(0),
     `${at(1)} seed.task_card=1 seed.task_card_size=90`,
@@ -283,8 +283,9 @@ test('an S4 seed counts as a read even when the seed falls back on budget', () =
   ]);
   try {
     const metric = run(root).metrics.superseded_refreshes;
-    assert.equal(metric.read_before_replacement.count, 1);
-    assert.equal(metric.read_before_replacement.reader_kinds.s4_seed.count, 1);
+    assert.equal(metric.read_before_replacement.count, 0);
+    assert.equal(metric.read_before_replacement.reader_kinds.s4_seed_fell_back.count, 0);
+    assert.equal(metric.never_read_before_replacement.count, 1);
   } finally {
     cleanup(root);
   }
@@ -323,8 +324,43 @@ test('reader kinds are reported individually and can overlap', () => {
     assert.equal(read.count, 1);
     assert.equal(read.reader_kinds.rule_check.count, 1);
     assert.equal(read.reader_kinds.card_check.count, 1);
-    assert.equal(read.reader_kinds.s4_seed.count, 1);
+    assert.equal(read.reader_kinds.s4_seed_fell_back.count, 1);
     assert.equal(metric.reader_kind_counts_overlap, true);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('mixed superseded cards split into one read and one never-read card', () => {
+  const root = fixture([
+    start(0), written(0),
+    `${at(1)} rule_check.fired=0 broken=0 units=4 ms=2`,
+    start(2), written(2),
+    start(3), written(3),
+    cut(4),
+  ]);
+  try {
+    const metric = run(root).metrics.superseded_refreshes;
+    assert.equal(metric.superseded_count, 2);
+    assert.equal(metric.read_before_replacement.count, 1);
+    assert.equal(metric.never_read_before_replacement.count, 1);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('a racing seed notice is not attributed as an S4 fallback read', () => {
+  const root = fixture([
+    start(0), written(0),
+    `${at(0.5)} rule_check.fired=0 broken=0 units=4 ms=2`,
+    `${at(1)} seed.task_card_racing=1 reason=too_large`,
+    start(2), written(2), cut(3),
+  ]);
+  try {
+    const metric = run(root).metrics.superseded_refreshes;
+    assert.equal(metric.read_before_replacement.count, 1);
+    assert.equal(metric.read_before_replacement.reader_kinds.rule_check.count, 1);
+    assert.equal(metric.read_before_replacement.reader_kinds.s4_seed_fell_back.count, 0);
   } finally {
     cleanup(root);
   }
@@ -365,6 +401,31 @@ test('dropped aggregates include orphan starts, writes without starts, and unpar
   }
 });
 
+test('a trailing refresh start is counted as an orphan', () => {
+  const root = fixture([start(0), written(1), cut(2), start(3)]);
+  try {
+    const report = run(root);
+    assert.equal(report.starts, 2);
+    assert.equal(report.dropped.orphan_starts, 1);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('a refresh start without ctx is counted as unparseable', () => {
+  const root = fixture([
+    `${at(0)} task_card.refresh=start window=250000 n=1`,
+    start(1), written(2),
+  ]);
+  try {
+    const report = run(root);
+    assert.equal(report.starts, 1);
+    assert.equal(report.dropped.unparseable_lines, 1);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test('notices.log files at the 1500-line cap are counted', () => {
   const root = fixture(Array.from({ length: 1500 }, (_, index) => `${at(index)} session.notice=${index}`));
   try {
@@ -394,6 +455,30 @@ test('per-file read errors are counted without printing the file path', (t) => {
     assert.doesNotMatch(result.stdout + result.stderr, /secret-session-name/);
   } finally {
     fs.chmodSync(file, 0o600);
+    cleanup(root);
+  }
+});
+
+test('unreadable subdirectories are counted without aborting or printing their path', (t) => {
+  const root = fixture([start(0), written(1)]);
+  const secretDir = path.join(root, 'secret-subdirectory-name');
+  fs.mkdirSync(secretDir);
+  try {
+    fs.chmodSync(secretDir, 0);
+    let canReadModeZeroDirectory = true;
+    try { fs.readdirSync(secretDir); } catch { canReadModeZeroDirectory = false; }
+    if (canReadModeZeroDirectory) {
+      t.skip('the current user can still read mode-000 directories');
+      return;
+    }
+    const result = spawnSync(process.execPath, [script, '--root', root, '--json'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, 'analysis should continue after an unreadable subdirectory');
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.sessions_scanned, 1);
+    assert.equal(report.file_read_errors, 1);
+    assert.doesNotMatch(result.stdout + result.stderr, /secret-subdirectory-name/);
+  } finally {
+    fs.chmodSync(secretDir, 0o700);
     cleanup(root);
   }
 });
