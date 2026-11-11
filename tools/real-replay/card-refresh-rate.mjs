@@ -9,8 +9,10 @@ import { estimateCardRefreshEquivalent } from './postcut.mjs';
 
 const DEFAULT_SINCE = '2026-10-01';
 const INTERVALS_MINUTES = [5, 10, 20, 30];
+const MAX_NOTICE_LOG_LINES = 1500;
 const CUT_NOTICE_RE = /\bcompacted\s+\S+\s+->\s+\S+\s+tokens\s+in\s+\S+\s+s\b/;
-const CUT_NOTICE_SOURCE = 'plugin/compact/compact.ts:1484';
+const CUT_NOTICE_SOURCE = 'plugin/compact/host/notices.ts:formatCutSummary';
+const READER_KINDS = ['rule_check', 'card_check', 's4_seed'];
 
 function parseArgs(argv) {
   let root = path.join(os.homedir(), '.exovault', 's4-capture');
@@ -51,14 +53,15 @@ function findNoticeFiles(root) {
 
 function parseNoticeLine(line, order) {
   const match = /^(\S+)\s+(.+)$/.exec(line);
-  if (!match) return undefined;
+  if (!line.trim()) return undefined;
+  if (!match) return { type: 'unparseable', order };
   const time = Date.parse(match[1]);
-  if (!Number.isFinite(time)) return undefined;
+  if (!Number.isFinite(time)) return { type: 'unparseable', order };
   const text = match[2];
   const start = /task_card\.refresh=start\b/.test(text);
   if (start) {
     const context = /\bctx=(\d+)\b/.exec(text);
-    if (!context) return undefined;
+    if (!context) return { type: 'unparseable', order, time };
     return {
       type: 'start', time, order, context: Number(context[1]),
       late: /(?:^|\s)late=1(?:\s|$)/.test(text),
@@ -68,29 +71,54 @@ function parseNoticeLine(line, order) {
   if (written) return { type: 'written', time, order, size: Number(written[1]) };
   const failed = /task_card\.refresh=(unparsed|no_reply|error)\b/.exec(text);
   if (failed) return { type: 'failed', time, order, result: failed[1] };
+  if (/task_card\.refresh=/.test(text)) return { type: 'unparseable', order, time };
   if (CUT_NOTICE_RE.test(text)) return { type: 'cut', time, order };
+  if (/\bcompacted\b/.test(text)) return { type: 'unparseable', order, time };
+  if (/^rule_check\.fired=[01]\s+broken=\d+\b/.test(text)) return { type: 'reader', time, order, readerKind: 'rule_check' };
+  if (/^brief_check\.fired=1\s+source=card(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 'card_check' };
+  if (/\bseed\.task_card=1(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 's4_seed' };
   return undefined;
 }
 
 function readSession(file, since) {
-  const events = fs.readFileSync(file, 'utf8').split(/\r?\n/)
-    .map((line, order) => parseNoticeLine(line, order))
+  let contents;
+  try {
+    contents = fs.readFileSync(file, 'utf8');
+  } catch {
+    return {
+      events: [], starts: [], writes: [], allWrites: [], failures: [], cutsSince: [],
+      dropped: { orphan_starts: 0, writes_without_start: 0, unparseable_lines: 0 },
+      unreadable: true, atLineCap: false,
+    };
+  }
+  const lines = contents.split(/\r?\n/).filter(Boolean);
+  const events = lines.map((line, order) => parseNoticeLine(line, order))
     .filter(Boolean)
-    .sort((a, b) => a.time - b.time || a.order - b.order);
-  const pendingStarts = [];
+    .sort((a, b) => (a.time ?? Number.NEGATIVE_INFINITY) - (b.time ?? Number.NEGATIVE_INFINITY) || a.order - b.order);
+  let pendingStart;
   const starts = [];
   const writes = [];
   const failures = [];
+  const dropped = { orphan_starts: 0, writes_without_start: 0, unparseable_lines: 0 };
   for (const event of events) {
+    if (event.type === 'unparseable') {
+      dropped.unparseable_lines += 1;
+      continue;
+    }
     if (event.type === 'start') {
+      if (pendingStart) dropped.orphan_starts += 1;
       const start = { time: event.time, context: event.context, late: event.late, order: event.order, inScope: event.time >= since };
-      pendingStarts.push(start);
+      pendingStart = start;
       starts.push(start);
       continue;
     }
     if (event.type !== 'written' && event.type !== 'failed') continue;
-    const start = pendingStarts.shift();
-    if (!start) continue;
+    if (!pendingStart) {
+      if (event.type === 'written') dropped.writes_without_start += 1;
+      continue;
+    }
+    const start = pendingStart;
+    pendingStart = undefined;
     if (event.type === 'failed') {
       if (start.inScope) failures.push({ start, result: event.result });
       continue;
@@ -104,10 +132,12 @@ function readSession(file, since) {
       order: event.order,
       inScope: start.inScope && event.time >= since,
       equivalents: estimateCardRefreshEquivalent(start.context, event.size),
+      readers: new Set(),
     };
     event.refresh = refresh;
     writes.push(refresh);
   }
+  if (pendingStart) dropped.orphan_starts += 1;
   return {
     events,
     starts: starts.filter((start) => start.inScope),
@@ -115,6 +145,9 @@ function readSession(file, since) {
     allWrites: writes,
     failures,
     cutsSince: events.filter((event) => event.type === 'cut' && event.time >= since),
+    dropped,
+    unreadable: false,
+    atLineCap: lines.length === MAX_NOTICE_LOG_LINES,
   };
 }
 
@@ -207,21 +240,41 @@ function supersededMetric(sessions, writes, cutNoticeCount) {
     for (const event of session.events) {
       if (event.type === 'cut') {
         latestWrite = undefined;
+      } else if (event.type === 'reader' && latestWrite) {
+        latestWrite.readers.add(event.readerKind);
       } else if (event.type === 'written' && event.refresh) {
         if (latestWrite?.inScope) superseded.push(latestWrite);
         latestWrite = event.refresh;
       }
     }
   }
-  const equivalents = sum(superseded.map((refresh) => refresh.equivalents));
   const allEquivalents = sum(writes.map((refresh) => refresh.equivalents));
+  const read = superseded.filter((refresh) => refresh.readers.size > 0);
+  const neverRead = superseded.filter((refresh) => refresh.readers.size === 0);
+  const categoryMetric = (refreshes) => ({
+    count: refreshes.length,
+    percent_of_written_refreshes: percent(refreshes.length, writes.length),
+    percent_of_superseded_refreshes: percent(refreshes.length, superseded.length),
+    equivalents: {
+      sum: sum(refreshes.map((refresh) => refresh.equivalents)),
+      percent_of_written_refresh_equivalents: percent(sum(refreshes.map((refresh) => refresh.equivalents)), allEquivalents),
+    },
+  });
+  const readerKinds = Object.fromEntries(READER_KINDS.map((kind) => {
+    const refreshes = read.filter((refresh) => refresh.readers.has(kind));
+    return [kind, {
+      ...categoryMetric(refreshes),
+      percent_of_read_before_replacement: percent(refreshes.length, read.length),
+    }];
+  }));
   return {
     n_sessions: new Set(writes.map((write) => write.session)).size,
     n_refreshes: writes.length,
-    count: superseded.length,
-    percent: percent(superseded.length, writes.length),
-    equivalents: { sum: equivalents, percent: percent(equivalents, allEquivalents) },
-    definition: 'A written card is superseded when another card is written before the next recorded cut summary.',
+    superseded_count: superseded.length,
+    read_before_replacement: { ...categoryMetric(read), reader_kinds: readerKinds },
+    never_read_before_replacement: categoryMetric(neverRead),
+    reader_kind_counts_overlap: true,
+    definition: 'A written card is superseded when another card is written before the next recorded cut summary. A reader is counted when its notice falls after that card was written and before it was replaced.',
   };
 }
 
@@ -239,6 +292,13 @@ export function analyzeCardRefreshRate(root, sinceText = DEFAULT_SINCE) {
   const starts = sessions.flatMap((session) => session.starts);
   const failures = sessions.flatMap((session) => session.failures);
   const cutNoticeCount = sessions.reduce((total, session) => total + session.cutsSince.length, 0);
+  const dropped = sessions.reduce((total, session) => ({
+    orphan_starts: total.orphan_starts + session.dropped.orphan_starts,
+    writes_without_start: total.writes_without_start + session.dropped.writes_without_start,
+    unparseable_lines: total.unparseable_lines + session.dropped.unparseable_lines,
+  }), { orphan_starts: 0, writes_without_start: 0, unparseable_lines: 0 });
+  const readErrors = sessions.filter((session) => session.unreadable).length;
+  const lineCapFiles = sessions.filter((session) => session.atLineCap).length;
   const superseded = supersededMetric(sessions, writes, cutNoticeCount);
   const metrics = {
     gap_between_written_refreshes_minutes: {
@@ -257,8 +317,13 @@ export function analyzeCardRefreshRate(root, sinceText = DEFAULT_SINCE) {
   };
   if (superseded) metrics.superseded_refreshes = superseded;
   return {
+    run_at: new Date().toISOString(),
     since: sinceText,
     sessions_scanned: files.length,
+    notices_files_at_line_cap: lineCapFiles,
+    notices_line_cap: MAX_NOTICE_LOG_LINES,
+    file_read_errors: readErrors,
+    dropped: { ...dropped, count: sum(Object.values(dropped)), scope: 'all scanned notices.log files' },
     sessions_with_starts: new Set(starts.map((start) => start.session)).size,
     starts: starts.length,
     written_refreshes: writes.length,
@@ -284,6 +349,7 @@ const formatNumber = (value) => value === null ? 'n/a' : Number(value.toFixed(2)
 function printReport(report) {
   const gaps = report.metrics.gap_between_written_refreshes_minutes;
   process.stdout.write(`Since ${report.since}; ${report.sessions_scanned} sessions scanned; ${report.starts} starts; ${report.written_refreshes} written refreshes\n`);
+  process.stdout.write(`Run at: ${report.run_at}\n`);
   for (const [name, metric] of [['normal', gaps.normal], ['late', gaps.late]]) {
     process.stdout.write(`${name} gaps: ${metric.gap_minutes.n} gaps in ${metric.n_sessions} sessions; median ${formatNumber(metric.gap_minutes.median)} minutes; IQR ${formatNumber(metric.gap_minutes.q1)} to ${formatNumber(metric.gap_minutes.q3)}\n`);
   }
@@ -292,10 +358,19 @@ function printReport(report) {
   }
   if (report.metrics.superseded_refreshes) {
     const metric = report.metrics.superseded_refreshes;
-    process.stdout.write(`Superseded: ${metric.count}/${metric.n_refreshes} (${formatPercent(metric.percent)}); equivalents ${formatNumber(metric.equivalents.sum)} (${formatPercent(metric.equivalents.percent)})\n`);
+    const read = metric.read_before_replacement;
+    const neverRead = metric.never_read_before_replacement;
+    process.stdout.write(`Superseded, read before replacement: ${read.count}/${metric.superseded_count} superseded (${formatPercent(read.percent_of_superseded_refreshes)}); ${formatNumber(read.equivalents.sum)} equivalents (${formatPercent(read.equivalents.percent_of_written_refresh_equivalents)})\n`);
+    for (const [kind, value] of Object.entries(read.reader_kinds)) {
+      process.stdout.write(`  ${kind}: ${value.count}/${metric.superseded_count} superseded (${formatPercent(value.percent_of_superseded_refreshes)}); ${formatNumber(value.equivalents.sum)} equivalents (${formatPercent(value.equivalents.percent_of_written_refresh_equivalents)})\n`);
+    }
+    process.stdout.write(`Superseded, never read before replacement: ${neverRead.count}/${metric.superseded_count} superseded (${formatPercent(neverRead.percent_of_superseded_refreshes)}); ${formatNumber(neverRead.equivalents.sum)} equivalents (${formatPercent(neverRead.equivalents.percent_of_written_refresh_equivalents)})\n`);
   } else process.stdout.write('Superseded metric omitted: no recorded cut summary notice in the selected range.\n');
+  process.stdout.write('Skipping a refresh means the rule check and the next cut see an older card.\n');
   const failed = report.metrics.failed_refreshes;
   process.stdout.write(`Failed: ${failed.count}/${failed.n_starts} starts (${formatPercent(failed.percent)})\n`);
+  process.stdout.write(`Dropped: ${report.dropped.count} total; ${report.dropped.orphan_starts} orphan starts, ${report.dropped.writes_without_start} writes without a start, ${report.dropped.unparseable_lines} unparseable lines\n`);
+  process.stdout.write(`notices.log files at 1500-line cap: ${report.notices_files_at_line_cap}; per-file read errors: ${report.file_read_errors}\n`);
   process.stdout.write(`Cut notice: ${report.cut_notice.pattern}; source ${report.cut_notice.source}; ${report.cut_notice.observed_since} observed\n`);
 }
 
