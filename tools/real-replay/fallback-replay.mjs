@@ -38,7 +38,7 @@ function messageFromEvent(event) {
 }
 
 /** Returns the session messages before this boundary, beginning after the preceding boundary. */
-export function messagesAtBoundary(events, boundaryIndex) {
+function messagesAtBoundaryDetails(events, boundaryIndex) {
   let previous = boundaryIndex - 1;
   while (previous >= 0 && !(events[previous]?.type === 'system' && events[previous]?.subtype === 'compact_boundary')) previous--;
   const previousBoundary = events[previous];
@@ -60,13 +60,23 @@ export function messagesAtBoundary(events, boundaryIndex) {
       chain.push(event);
       cursor = event.parentUuid ?? event.logicalParentUuid;
     }
-    if (reachedPreviousBoundary) return chain.toReversed()
-      .filter((event) => (event.type === 'user' || event.type === 'assistant') && !event.isSidechain)
-      .map(messageFromEvent);
+    if (reachedPreviousBoundary) return {
+      messages: chain.toReversed()
+        .filter((event) => (event.type === 'user' || event.type === 'assistant') && !event.isSidechain)
+        .map(messageFromEvent),
+      source: 'parent_chain',
+    };
   }
-  return events.slice(previous + 1, boundaryIndex)
-    .filter((event) => (event.type === 'user' || event.type === 'assistant') && !event.isSidechain)
-    .map(messageFromEvent);
+  return {
+    messages: events.slice(previous + 1, boundaryIndex)
+      .filter((event) => (event.type === 'user' || event.type === 'assistant') && !event.isSidechain)
+      .map(messageFromEvent),
+    source: 'interval_fallback',
+  };
+}
+
+export function messagesAtBoundary(events, boundaryIndex) {
+  return messagesAtBoundaryDetails(events, boundaryIndex).messages;
 }
 
 /** All messages on the active transcript branch before a boundary, including earlier compact segments. */
@@ -360,7 +370,7 @@ function recordIdentity(sourceHash) {
   return /^([a-f0-9]{64})#\d+(?::|$)/.exec(String(sourceHash ?? ''))?.[1];
 }
 
-function historicalCaptureFiles(files, cutAt, identities) {
+export function historicalCaptureFiles(files, cutAt, identities) {
   const cutoff = isoMs(cutAt);
   const visibleFiles = new Set(captureSnapshotAt(files.map((file) => ({
     ...file,
@@ -370,6 +380,7 @@ function historicalCaptureFiles(files, cutAt, identities) {
   })), cutAt).keys());
   const byName = new Map();
   const omittedAfterCut = [];
+  const identityFilter = { tagged: 0, matched: 0, dropped: 0, opaque: 0, opaqueIncluded: 0 };
   for (const file of files) {
     if (!visibleFiles.has(file.name)) { omittedAfterCut.push(file.name); continue; }
     if (/^segment-\d+\.json$/.test(file.name)) {
@@ -378,13 +389,24 @@ function historicalCaptureFiles(files, cutAt, identities) {
         let record;
         try { record = JSON.parse(line); } catch { continue; }
         const identity = recordIdentity(record.sourceHash);
-        if (identity ? identities.has(identity) : file.mtimeMs <= cutoff) kept.push(JSON.stringify(record));
+        if (identity) {
+          identityFilter.tagged++;
+          if (identities.has(identity)) {
+            identityFilter.matched++;
+            kept.push(JSON.stringify(record));
+          } else identityFilter.dropped++;
+        } else {
+          identityFilter.opaque++;
+          if (file.mtimeMs <= cutoff) {
+            identityFilter.opaqueIncluded++;
+            kept.push(JSON.stringify(record));
+          }
+        }
       }
       if (kept.length) byName.set(file.name, kept.join('\n'));
-    } else if (file.mtimeMs <= cutoff) byName.set(file.name, file.text);
-    else { omittedAfterCut.push(file.name); }
+    } else byName.set(file.name, file.text);
   }
-  return { byName, omittedAfterCut };
+  return { byName, omittedAfterCut, identityFilter };
 }
 
 export function cardFromSeedText(value) {
@@ -531,19 +553,32 @@ function boundaryRows(events) {
     : null).filter(Boolean);
 }
 
-function matchBoundaries(cuts, boundaries) {
+export function matchBoundaries(cuts, boundaries, allCuts = cuts) {
   const available = [...boundaries];
   const matched = new Map();
+  const allByStart = [...allCuts].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
   for (const cut of [...cuts].sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt))) {
     const target = Date.parse(cut.completedAt);
+    const startedAt = Date.parse(cut.startedAt);
+    const cutPosition = allByStart.indexOf(cut);
+    const nextCutStart = cutPosition >= 0 && allByStart[cutPosition + 1]
+      ? Date.parse(allByStart[cutPosition + 1].startedAt)
+      : Infinity;
     let bestIndex = -1;
     let bestDistance = Infinity;
     for (const [index, boundary] of available.entries()) {
       if (!Number.isFinite(boundary.at)) continue;
+      if (!Number.isFinite(startedAt) || boundary.at < startedAt || boundary.at >= nextCutStart) continue;
+      const durationValue = boundary.event?.compactMetadata?.durationMs;
+      if (durationValue !== undefined && durationValue !== null) {
+        const durationMs = Number(durationValue);
+        if (!Number.isFinite(durationMs) || Math.abs(boundary.at - durationMs - startedAt) > 10_000) continue;
+      }
       const distance = Math.abs(boundary.at - target);
+      if (distance > 5 * 60_000) continue;
       if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
     }
-    if (bestIndex >= 0 && bestDistance <= 5 * 60_000) matched.set(cut, available.splice(bestIndex, 1)[0]);
+    if (bestIndex >= 0) matched.set(cut, available.splice(bestIndex, 1)[0]);
   }
   return matched;
 }
@@ -611,7 +646,8 @@ async function loadPlugin(pluginDir) {
   } });
   const module = await import(pathToFileURL(path.join(pluginDir, 'compact.ts')));
   const extractor = await import(pathToFileURL(path.join(pluginDir, 'core/extractor.ts')));
-  return { register: module.register, extractor };
+  const budgetCore = await import(pathToFileURL(path.join(pluginDir, 'core/budgets.ts')));
+  return { register: module.register, extractor, budgetCore };
 }
 
 function handlersFor(register, options) {
@@ -682,7 +718,46 @@ function ratioRange(values) {
   return values.length ? { min: Math.min(...values), max: Math.max(...values) } : null;
 }
 
-function makeHost({ sessionId, sessionDir, cwd, cut, snapshot: snapshotFiles, pluginDir, gitProbe }) {
+function noticeNumber(logs, pattern) {
+  for (const line of logs) {
+    const match = pattern.exec(line);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+export function replaySeedMetrics({ result, logs, realTokenCount, budgetCore }) {
+  const seedMessage = Array.isArray(result?.messages) ? result.messages[0] : undefined;
+  const countTokens = realTokenCount ? budgetCore.estimateTokens : (text) => Math.ceil(String(text ?? '').length / 4);
+  const seedTokens = seedMessage ? budgetCore.serializedTokens([seedMessage], countTokens) : null;
+  const tokensAfter = Number.isFinite(result?.tokensAfter) ? result.tokensAfter : null;
+  const over = budgetParts(logs.find((line) => line.startsWith('seed.budget_over ')));
+  const baseTotal = noticeNumber(logs, /\bseed\.budget_total=(\d+)/);
+  const baseSeed = noticeNumber(logs, /\bseed\.budget_split seed=(\d+)/);
+  const baseTail = noticeNumber(logs, /\bseed\.budget_split seed=\d+ tail=(\d+)/);
+  const shifted = noticeNumber(logs, /\bseed\.brief_tail_shift=(\d+)/) ?? 0;
+  const returned = noticeNumber(logs, /\bseed\.brief_shift_returned=(\d+)/) ?? 0;
+  const effectiveTailBudget = baseTail === null ? null : Math.max(0, baseTail - Math.max(0, shifted - returned));
+  const taskCard = noticeNumber(logs, /^seed\.task_card=(\d+)/);
+  const briefLastPrompt = noticeNumber(logs, /\bseed\.brief_last_prompt=(\d+)/);
+  const cardOn = taskCard === 1 || briefLastPrompt === 1;
+  let seedBudget = over?.[1] ?? null;
+  if (seedBudget === null && Number.isFinite(baseTotal) && Number.isFinite(baseSeed) && Number.isFinite(baseTail) && Number.isFinite(seedTokens) && Number.isFinite(tokensAfter)) {
+    const tailTokens = Math.max(0, tokensAfter - seedTokens);
+    seedBudget = cardOn && tailTokens > effectiveTailBudget
+      ? baseTotal - effectiveTailBudget
+      : baseTotal - tailTokens;
+  }
+  if (seedBudget === null && Number.isFinite(baseSeed)) seedBudget = baseSeed;
+  return {
+    seedTokens,
+    tokensAfter,
+    seedBudget,
+    seedMargin: Number.isFinite(seedBudget) && Number.isFinite(seedTokens) ? seedBudget - seedTokens : null,
+  };
+}
+
+export function makeHost({ sessionId, sessionDir, cwd, cut, snapshot: snapshotFiles, pluginDir, gitProbe }) {
   const snapshot = new Map([...snapshotFiles].map(([name, text]) => [path.resolve(sessionDir, name), text]));
   const overlay = createMemoryOverlay(async (file) => {
     if (snapshot.has(path.resolve(file))) return snapshot.get(path.resolve(file));
@@ -752,11 +827,12 @@ function makeHost({ sessionId, sessionDir, cwd, cut, snapshot: snapshotFiles, pl
   return { host, logs, writes: memoryWrites, snapshot };
 }
 
-async function replayCut({ plugin, register, extractor, session, cut, boundary, options }) {
+async function replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary, options }) {
   if (!session.transcriptPath) return { sessionId: session.sessionId, ordinal: cut.ordinal, type: cut.type, eligible: false, reason: 'transcript missing' };
-  if (!boundary) return { sessionId: session.sessionId, ordinal: cut.ordinal, type: cut.type, eligible: false, reason: 'no compact boundary matched notice timestamp' };
+  if (!boundary) return { sessionId: session.sessionId, ordinal: cut.ordinal, type: cut.type, eligible: false, reason: 'no compact boundary matched cut start, duration, and five-minute notice window' };
   const events = session.events;
-  const eventMessages = messagesAtBoundary(events, boundary.index);
+  const eventMessageDetails = messagesAtBoundaryDetails(events, boundary.index);
+  const eventMessages = eventMessageDetails.messages;
   const branchMessages = messagesThroughBoundary(events, boundary.index);
   const identities = identityCutoff(branchMessages, extractor);
   const historical = historicalCaptureFiles(session.captureFiles, cut.startedAt, identities);
@@ -780,7 +856,7 @@ async function replayCut({ plugin, register, extractor, session, cut, boundary, 
     activeToolUseIds,
   });
   historical.byName = cardHorizon.snapshot;
-  const { host, logs, writes, snapshot } = makeHost({
+  const { host, logs, snapshot } = makeHost({
     sessionId: session.sessionId,
     sessionDir: session.sessionDir,
     cwd: events.slice(0, boundary.index).toReversed().find((event) => typeof event.cwd === 'string')?.cwd ?? '/project',
@@ -789,7 +865,7 @@ async function replayCut({ plugin, register, extractor, session, cut, boundary, 
     pluginDir: plugin,
     gitProbe,
   });
-  const input = { trigger: ['auto', 'manual', 'plugin', 'precompute'].includes(boundary.event.compactMetadata?.trigger) ? boundary.event.compactMetadata.trigger : 'auto', messages: eventMessages };
+  const input = { trigger: ['auto', 'manual', 'plugin'].includes(boundary.event.compactMetadata?.trigger) ? boundary.event.compactMetadata.trigger : 'auto', messages: eventMessages };
   const cutOptions = { ...options, realTokenCount: realTokenCountForCut(cut) };
   const handlers = handlersFor(register, cutOptions);
   let nextCalls = 0;
@@ -807,17 +883,14 @@ async function replayCut({ plugin, register, extractor, session, cut, boundary, 
   const reason = fallbackLine ? (/^compact\.fallback=([^\s]+)/.exec(fallbackLine)?.[1] ?? 'unknown') : null;
   const sizeLine = logs.find((line) => line.startsWith('compact.sizeBefore='));
   const budgetOver = logs.find((line) => line.startsWith('seed.budget_over '));
-  const seedSizeLine = logs.find((line) => line.startsWith('seed.rendered_size='));
-  const seedSize = seedSizeLine ? Number(/\bseed\.rendered_size=(\d+)/.exec(seedSizeLine)?.[1]) : budgetParts(budgetOver)?.[0] ?? null;
-  const seedBudget = seedSizeLine ? Number(/\bseed\.rendered_budget=(\d+)/.exec(seedSizeLine)?.[1]) : budgetParts(budgetOver)?.[1] ?? null;
+  const seedMetrics = replaySeedMetrics({ result, logs, realTokenCount: cutOptions.realTokenCount, budgetCore });
   const s5zPrefixes = ['seed.session_map_shrunk=', 'seed.constraints_shrunk=', 'seed.ids_dropped_for_budget='];
   const replay = {
     fellBack: nextCalls > 0,
     reason,
     realTokenCount: cutOptions.realTokenCount,
     sizeBefore: sizeLine ? Number(/^compact\.sizeBefore=(\d+)/.exec(sizeLine)?.[1]) : null,
-    seedTokens: Number.isFinite(seedSize) ? seedSize : null,
-    seedBudget: Number.isFinite(seedBudget) ? seedBudget : null,
+    ...seedMetrics,
     budgetOver: budgetOver ?? null,
     sectionSizes: sectionSizes(logs.map((body) => ({ body }))),
     sectionNotices: sectionNotices(logs),
@@ -850,6 +923,17 @@ async function replayCut({ plugin, register, extractor, session, cut, boundary, 
       sectionNotices: sectionNotices(cut.noticeLines),
     },
     replay,
+    fidelity: {
+      transcriptMessageSource: eventMessageDetails.source,
+      captureIdentityFilter: {
+        taggedRecords: historical.identityFilter.tagged,
+        matchedRecords: historical.identityFilter.matched,
+        droppedRecords: historical.identityFilter.dropped,
+        droppedRatio: historical.identityFilter.tagged ? historical.identityFilter.dropped / historical.identityFilter.tagged : null,
+        opaqueRecords: historical.identityFilter.opaque,
+        opaqueIncludedRecords: historical.identityFilter.opaqueIncluded,
+      },
+    },
     reproduced,
     excludedReason,
     snapshot: {
@@ -891,7 +975,7 @@ function shortTable(rows) {
 export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, projectsRoot = PROJECTS_ROOT, settingsFile = path.join(HOME, '.claude/settings.json'), noticesBefore }) {
   const plugin = path.resolve(pluginDir);
   const options = localOptions(plugin, settingsFile);
-  const { register, extractor } = await loadPlugin(plugin);
+  const { register, extractor, budgetCore } = await loadPlugin(plugin);
   const cutoff = noticesBefore === undefined ? undefined : Date.parse(noticesBefore);
   if (cutoff !== undefined && !Number.isFinite(cutoff)) throw new Error(`Invalid --notices-before timestamp: ${noticesBefore}`);
   const sessions = discoverData(captureRoot, projectsRoot, cutoff);
@@ -905,10 +989,10 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
     const transcript = await readJsonl(session.transcriptPath);
     session.events = transcript.events;
     const boundaries = boundaryRows(session.events);
-    const byCut = matchBoundaries([...selected], boundaries);
+    const byCut = matchBoundaries([...selected], boundaries, session.cuts);
     for (const cut of [...selected].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))) {
       cut.type = cut.originalFallback === 'budget' ? 'fallback' : 'control';
-      results.push(await replayCut({ plugin, register, extractor, session, cut, boundary: byCut.get(cut), options }));
+      results.push(await replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary: byCut.get(cut), options }));
     }
   }
   const sessionsSummary = sessions.map((session) => {
@@ -954,6 +1038,9 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
       sectionDifferences,
     };
   });
+  const keptSeedMargins = results
+    .filter((row) => row.eligible && !row.replay.fellBack && Number.isFinite(row.replay.seedMargin))
+    .map((row) => row.replay.seedMargin);
   const cardSourceCounts = {};
   for (const row of results.filter((item) => item.eligible)) {
     const source = row.snapshot.cardSource ?? 'unavailable';
@@ -969,8 +1056,8 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
     settingsSource: settingsFile,
     options: Object.fromEntries(['recallEnabled', 'interactiveOnly', 'taskCard', 'sessionMap', 'cardTotalBudgetTokens', 'realTokenCount', 'jevEnabled', 'recallVectors', 'workStateProbe', 'notices'].map((key) => [key, options[key]])),
     method: {
-      captureRule: 'Overwritten capture sidecars use mtime at compact.sizeBefore. A numbered segment is visible only if its birthtime is at or before the cut; its sourceHash records are then filtered to the active transcript branch through the target boundary, while opaque records also need mtime at or before the cut. Original task-card notices and the card budget split determine whether a cut had a card. When the snapshot lacks it, a surviving transcript seed/read/write is used when available, then the current task-card.md text. A missing card horizon is rebuilt only when the original cut logged a found horizon and its refresh/write notices pair with an active-branch tool result. timeline.json segments and briefs.json entries are filtered by their to/at timestamps.',
-      transcriptRule: 'Use the parentUuid chain from the matched boundary logicalParentUuid back to the preceding compact_boundary when complete, excluding sidechains; fall back to the intervening user/assistant events when links are missing. Match notice completion time to the nearest transcript compact_boundary within five minutes.',
+      captureRule: 'Overwritten capture sidecars are admitted by mtime at the cut. A numbered segment is visible only if its birthtime is at or before the cut; its sourceHash records are then filtered to the active transcript branch through the target boundary, while opaque records also need mtime at or before the cut. Original task-card notices and the card budget split determine whether a cut had a card. When the snapshot lacks it, a surviving transcript seed/read/write is used when available, then the current task-card.md text. A missing card horizon is rebuilt only when the original cut logged a found horizon and its refresh/write notices pair with an active-branch tool result. timeline.json segments and briefs.json entries are filtered by their to/at timestamps.',
+      transcriptRule: 'Use the parentUuid chain from the matched boundary logicalParentUuid back to the preceding compact_boundary when complete, excluding sidechains; fall back to the intervening user/assistant events when links are missing. A boundary must be at or after the cut start, its duration (when present) must place its start within ten seconds of the logged cut start, and it must be within five minutes of the notice completion time.',
       writes: 'All $.fs.write operations are held in an in-memory map; process.run does not launch commands, but supplies preceding transcript output for Git status/worktree probes. Other process calls are inert, HTTP fetch throws, and no capture or transcript paths are written.',
       limits: [
         'Capture segments have no per-record timestamp; sourceHash-to-transcript matching can misclassify identical repeated messages, and opaque synthetic records in a pre-existing segment are limited by the whole file mtime. Transcript parent chains are missing for some cuts, so those cuts use the interval fallback.',
@@ -1008,6 +1095,12 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
         medianReplayToLoggedRatio: median(seedSizeRatios),
         replayToLoggedRatioRange: ratioRange(seedSizeRatios),
         largestGaps: [...seedSizePairs].sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap)).slice(0, 12),
+      },
+      keptSeedMargin: {
+        compared: keptSeedMargins.length,
+        median: median(keptSeedMargins),
+        range: keptSeedMargins.length ? { min: Math.min(...keptSeedMargins), max: Math.max(...keptSeedMargins) } : null,
+        method: 'Effective seed allowance minus replay seed tokens; derived from the returned seed/tokensAfter and replay budget notices.',
       },
     },
     sessions: sessionsSummary,
