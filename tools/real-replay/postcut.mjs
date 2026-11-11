@@ -140,6 +140,7 @@ function makeCut(e, sequence, session) {
     recoveryCallIds: new Set(),
     toolCalls: [],
     toolResultTokens: new Map(),
+    cardRefreshEstimates: [],
   };
 }
 
@@ -159,6 +160,8 @@ function finalizeCut(cut, out) {
     kind,
     _session: cut.session,
     window: windowName(cut.preTokens),
+    cardRefreshCount: cut.cardRefreshEstimates.length,
+    cardRefreshEstimate: cut.cardRefreshEstimates.reduce((sum, estimate) => sum + estimate, 0),
     firstContext: first ? first.input_tokens + first.cache_creation_input_tokens + first.cache_read_input_tokens : null,
     preTokens: cut.preTokens,
     postTokens: cut.postTokens,
@@ -236,6 +239,7 @@ async function analyzeTranscript(file, since, output) {
   const subagent = isSubagentPath(file);
   let current = null;
   let pendingCardRefreshContext = null;
+  let cardRefreshSpan = [];
   let sequence = 0;
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
 
@@ -252,10 +256,12 @@ async function analyzeTranscript(file, since, output) {
       const refreshStart = /task_card\.refresh=start ctx=(\d+)/.exec(notice);
       const refreshWritten = /task_card\.refresh=written size=(\d+)/.exec(notice);
       if (refreshStart) {
-        pendingCardRefreshContext = { time, context: Number(refreshStart[1]) };
+        pendingCardRefreshContext = { time, context: Number(refreshStart[1]), span: cardRefreshSpan };
       } else if (refreshWritten) {
         if (pendingCardRefreshContext && pendingCardRefreshContext.time >= since && time >= since) {
-          output.cardRefreshLowerBounds.push(0.1 * pendingCardRefreshContext.context + 5 * Number(refreshWritten[1]));
+          const estimate = 0.1 * pendingCardRefreshContext.context + 5 * Number(refreshWritten[1]);
+          output.cardRefreshNotices.push({ session: file, estimate });
+          pendingCardRefreshContext.span.push(estimate);
         }
         pendingCardRefreshContext = null;
       } else if (/task_card\.refresh=(?:unparsed|no_reply|error)\b/.test(notice)) {
@@ -265,6 +271,8 @@ async function analyzeTranscript(file, since, output) {
     if (e.type === 'system' && e.subtype === 'compact_boundary') {
       finalizeCut(current, output);
       current = makeCut(e, sequence, file);
+      current.cardRefreshEstimates = cardRefreshSpan;
+      cardRefreshSpan = [];
       continue;
     }
     if (!current) continue;
@@ -392,7 +400,7 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
   }
   const summaryOutput = summarize(summaryMetrics.nativeSummaryOutput);
   const summaryLowerBound = summarize(summaryMetrics.nativeSummaryLowerBounds);
-  const cardRefreshLowerBound = summarize(summaryMetrics.cardRefreshLowerBounds ?? []);
+  const cardRefreshApproximateEstimate = summarize((summaryMetrics.cardRefreshNotices ?? []).map((notice) => notice.estimate));
   const proxyCuts = withSession.filter((cut) => cut.window === '200k');
   const breakEvenRows = CUMULATIVE_CALL_COUNTS.map((n) => {
     const costs = Object.fromEntries(kinds.map((kind) => {
@@ -403,7 +411,7 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
       ? null : costs.native.median - costs.s4.median;
     return { calls: n, s4: costs.s4, native: costs.native, medianGap };
   });
-  const cardRefreshCostAllowanceByCalls = CALL_COUNTS.map((calls) => {
+  const extraExoCutCostAllowanceByCalls = CALL_COUNTS.map((calls) => {
     const row = breakEvenRows.find((candidate) => candidate.calls === calls);
     return {
       calls,
@@ -416,6 +424,28 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
       },
     };
   });
+  const cardRefreshNoticeSessions = new Set((summaryMetrics.cardRefreshNotices ?? []).map((notice) => notice.session));
+  const cutsInNoticeSessions = withSession.filter((cut) => cut.kind === 's4' && cardRefreshNoticeSessions.has(cut._session));
+  const refreshedCuts = cutsInNoticeSessions.filter((cut) => cut.cardRefreshCount > 0);
+  const cardRefreshByCut = {
+    sessionsWithNotices: cardRefreshNoticeSessions.size,
+    cutsInNoticeSessions: cutsInNoticeSessions.length,
+    cutsWithRecordedRefreshes: refreshedCuts.length,
+    refreshesPerCut: summarize(cutsInNoticeSessions.map((cut) => cut.cardRefreshCount)),
+    refreshesPerRefreshedCut: summarize(refreshedCuts.map((cut) => cut.cardRefreshCount)),
+    approximateEstimatePerCut: summarize(cutsInNoticeSessions.map((cut) => cut.cardRefreshEstimate)),
+    approximateEstimatePerRefreshedCut: summarize(refreshedCuts.map((cut) => cut.cardRefreshEstimate)),
+    allowanceExceedance: extraExoCutCostAllowanceByCalls.map((allowance) => {
+      const n = refreshedCuts.filter((cut) => cut.cardRefreshEstimate > allowance.median).length;
+      return {
+        calls: allowance.calls,
+        allowance: allowance.median,
+        n,
+        denominator: refreshedCuts.length,
+        share: refreshedCuts.length ? n / refreshedCuts.length : null,
+      };
+    }),
+  };
   return {
     since: sinceText,
     transcriptsScanned: filesScanned,
@@ -426,14 +456,16 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
     recovery: recoveryReport(recoveryRows),
     nativeSummaryOutputTokensEstimate: summaryOutput,
     nativeSummaryLowerBound: summaryLowerBound,
-    cardRefreshLowerBound: {
+    cardRefreshApproximateEstimate: {
       source: 'paired local task_card.refresh=start ctx and task_card.refresh=written size notices',
-      assumption: 'Approximate lower bound: refresh context counted as cache reads and recorded card size counted as output tokens.',
-      ...cardRefreshLowerBound,
+      assumption: 'Approximate estimate: refresh context counted as cache reads and recorded card size counted as output tokens. The plugin token estimate is conservatively high and can exceed actual output, so this is not a strict lower bound.',
+      sessionsWithNotices: cardRefreshNoticeSessions.size,
+      ...cardRefreshApproximateEstimate,
     },
+    cardRefreshByCut,
     breakEven: {
-      assumption: 'Indicative extra exo cut cost allowance from the approximate native summary-call lower bound plus the difference between unpaired 200k proxy cohort cumulative medians.',
-      cardRefreshCostAllowanceByCalls,
+      assumption: 'Indicative extra exo cost allowance per cut from the approximate native summary-call lower bound plus the difference between unpaired 200k proxy cohort cumulative medians.',
+      extraExoCutCostAllowanceByCalls,
       cumulativeMedianSavings: breakEvenRows,
     },
   };
@@ -511,10 +543,15 @@ function printReport(report) {
   }
   console.log(`Native compact-summary output estimate (chars / 4): ${formatStats(report.nativeSummaryOutputTokensEstimate)} tokens`);
   console.log(`Native summary-call approximate lower bound (0.1 x preTokens + 5 x summary estimate): ${formatStats(report.nativeSummaryLowerBound)} input-token equivalents`);
-  console.log(`Card-refresh approximate lower bound (0.1 x refresh context + 5 x recorded written-card size; ${report.cardRefreshLowerBound.source}): ${formatStats(report.cardRefreshLowerBound)} input-token equivalents`);
-  console.log('Indicative card-refresh allowance: exo stays cheaper while its extra cut cost is below the native summary-call lower bound plus native post-cut median minus exo post-cut median; medians are from unpaired samples.');
-  for (const allowance of report.breakEven.cardRefreshCostAllowanceByCalls) {
+  console.log(`Card-refresh approximate estimate (not a strict lower bound; 0.1 x refresh context + 5 x recorded written-card size; ${report.cardRefreshApproximateEstimate.n} paired refresh notices in ${report.cardRefreshApproximateEstimate.sessionsWithNotices} of ${report.cuts.s4.sessions} exo sessions): ${formatStats(report.cardRefreshApproximateEstimate)} input-token equivalents`);
+  console.log(`Notice-bearing sessions: ${report.cardRefreshByCut.cutsWithRecordedRefreshes}/${report.cardRefreshByCut.cutsInNoticeSessions} exo cuts have recorded refreshes; refresh count across all cuts ${formatStats(report.cardRefreshByCut.refreshesPerCut)}; among refreshed cuts ${formatStats(report.cardRefreshByCut.refreshesPerRefreshedCut)} and summed estimate ${formatStats(report.cardRefreshByCut.approximateEstimatePerRefreshedCut)} equivalents`);
+  console.log('Indicative extra exo cost allowance per cut: native summary-call approximate lower bound plus native post-cut median minus exo post-cut median; post-cut medians are from unpaired samples.');
+  for (const allowance of report.breakEven.extraExoCutCostAllowanceByCalls) {
     console.log(`  after ${allowance.calls} calls: ${format(allowance.median)} equivalents (n=${allowance.n.summaryBound} summary bounds, ${allowance.n.native} native cuts, ${allowance.n.s4} exo cuts)`);
+  }
+  for (const exceedance of report.cardRefreshByCut.allowanceExceedance) {
+    const share = exceedance.share == null ? 'n/a' : `${(100 * exceedance.share).toFixed(1)}%`;
+    console.log(`  recorded estimate above ${exceedance.calls}-call allowance: ${exceedance.n}/${exceedance.denominator} refreshed cuts (${share})`);
   }
   for (const kind of ['native', 's4']) {
     const grouped = report.recovery[kind];
@@ -530,12 +567,12 @@ function printReport(report) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const files = expandInputs(args.inputs);
-  const internal = { since: args.since, cuts: [], recovery: [], nativeSummaryOutput: [], nativeSummaryLowerBounds: [], cardRefreshLowerBounds: [] };
+  const internal = { since: args.since, cuts: [], recovery: [], nativeSummaryOutput: [], nativeSummaryLowerBounds: [], cardRefreshNotices: [] };
   for (const file of files) await analyzeTranscript(file, args.since, internal);
   const report = aggregatePostCuts(internal.cuts, {
     nativeSummaryOutput: internal.nativeSummaryOutput,
     nativeSummaryLowerBounds: internal.nativeSummaryLowerBounds,
-    cardRefreshLowerBounds: internal.cardRefreshLowerBounds,
+    cardRefreshNotices: internal.cardRefreshNotices,
   }, files.length, args.sinceText, internal.recovery);
   if (args.jsonOut) fs.writeFileSync(args.jsonOut, `${JSON.stringify(report, null, 2)}\n`);
   printReport(report);

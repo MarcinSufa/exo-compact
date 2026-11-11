@@ -107,7 +107,7 @@ test('card-refresh allowance uses the native bound plus the native and exo media
     nativeSummaryLowerBounds: [40, 60],
   }, cuts.length, '2026-10-01');
 
-  assert.deepEqual(report.breakEven.cardRefreshCostAllowanceByCalls, [
+  assert.deepEqual(report.breakEven.extraExoCutCostAllowanceByCalls, [
     { calls: 1, median: 120, n: { summaryBound: 2, native: 4, s4: 4 } },
     { calls: 5, median: 400, n: { summaryBound: 2, native: 4, s4: 4 } },
     { calls: 20, median: 1450, n: { summaryBound: 2, native: 4, s4: 4 } },
@@ -146,7 +146,7 @@ test('recovery summaries preserve the upper median for even samples', () => {
   assert.equal(report.recovery.native.all.costTokens.median, 60);
 });
 
-test('card-refresh lower bound uses paired local context and written-size notices', () => {
+test('card-refresh approximate estimate uses paired local context and written-size notices', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-notices-'));
   const reportPath = path.join(root, 'aggregate.json');
   writeEvents(path.join(root, 'capture-notices.jsonl'), [
@@ -158,9 +158,113 @@ test('card-refresh lower bound uses paired local context and written-size notice
     const run = analyze(root, reportPath);
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-    assert.equal(report.cardRefreshLowerBound.n, 1);
-    assert.equal(report.cardRefreshLowerBound.median, 2000);
-    assert.match(report.cardRefreshLowerBound.source, /task_card\.refresh=start ctx.*task_card\.refresh=written size/);
+    assert.equal(report.cardRefreshApproximateEstimate.n, 1);
+    assert.equal(report.cardRefreshApproximateEstimate.median, 2000);
+    assert.match(report.cardRefreshApproximateEstimate.source, /task_card\.refresh=start ctx.*task_card\.refresh=written size/);
+    assert.match(report.cardRefreshApproximateEstimate.assumption, /not a strict lower bound/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed refresh notices clear the pending start before a later write', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-failure-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  writeEvents(path.join(root, 'capture-notices.jsonl'), [
+    boundary(stamp('10')),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 1), content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 2), content: 'exo-compact: task_card.refresh=unparsed size=0' }),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 3), content: 'exo-compact: task_card.refresh=written size=200' }),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 4), content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 5), content: 'exo-compact: task_card.refresh=written size=200' }),
+  ]);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cardRefreshApproximateEstimate.n, 1);
+    assert.equal(report.cardRefreshApproximateEstimate.median, 3000);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--since filters both the refresh start and written notice', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-since-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  writeEvents(path.join(root, 'capture-notices.jsonl'), [
+    event('system', { subtype: 'informational', timestamp: '2026-09-30T23:59:59.000Z', content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-01T00:00:01.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-01T00:00:02.000Z', content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-01T00:00:03.000Z', content: 'exo-compact: task_card.refresh=written size=300' }),
+    boundary('2026-10-01T00:00:04.000Z'),
+  ]);
+  try {
+    const run = analyze(root, reportPath, '2026-10-01');
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cardRefreshApproximateEstimate.n, 1);
+    assert.equal(report.cardRefreshApproximateEstimate.median, 3500);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('card refresh estimates are summed within the interval ending at each cut', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-sum-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  writeEvents(path.join(root, 'parent.jsonl'), [
+    boundary('2026-10-10T12:00:00.000Z'),
+    event('user', { timestamp: '2026-10-10T12:00:01.000Z', message: { content: '[[exovault:s4-seed:v1]] first' } }),
+    assistant('first-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:00:02.000Z'),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:12.000Z', content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:13.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
+    boundary('2026-10-10T12:01:00.000Z'),
+    event('user', { timestamp: '2026-10-10T12:01:01.000Z', message: { content: '[[exovault:s4-seed:v1]] second' } }),
+    assistant('second-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:01:02.000Z'),
+    boundary('2026-10-10T12:02:00.000Z'),
+    event('user', { timestamp: '2026-10-10T12:02:01.000Z', message: { content: '[[exovault:s4-seed:v1]] third' } }),
+    assistant('third-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:02:02.000Z'),
+  ]);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cardRefreshApproximateEstimate.n, 2);
+    assert.equal(report.cardRefreshApproximateEstimate.sessionsWithNotices, 1);
+    assert.equal(report.cardRefreshByCut.cutsInNoticeSessions, 3);
+    assert.equal(report.cardRefreshByCut.cutsWithRecordedRefreshes, 1);
+    assert.deepEqual(report.cardRefreshByCut.refreshesPerCut, {
+      n: 3, median: 0, q1: 0, q3: 1, min: 0, max: 2,
+    });
+    assert.deepEqual(report.cardRefreshByCut.refreshesPerRefreshedCut, {
+      n: 1, median: 2, q1: 2, q3: 2, min: 2, max: 2,
+    });
+    assert.deepEqual(report.cardRefreshByCut.approximateEstimatePerRefreshedCut, {
+      n: 1, median: 5000, q1: 5000, q3: 5000, min: 5000, max: 5000,
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('first post-cut assistant call must not predate the injected message', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-injection-time-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  writeEvents(path.join(root, 'seed-cut.jsonl'), [
+    boundary(stamp('10')),
+    event('user', { timestamp: stamp('10', 2), message: { content: '[[exovault:s4-seed:v1]] fixture' } }),
+    assistant('before-injection', usage(900, 800, 700, 600), stamp('10', 1)),
+    assistant('after-injection', usage(10, 20, 30, 4), stamp('10', 3)),
+  ]);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cuts.s4.firstContext.median, 60);
+    assert.equal(report.cuts.s4.costByCalls['1'].median, 58);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

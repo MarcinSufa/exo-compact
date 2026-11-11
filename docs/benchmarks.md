@@ -228,16 +228,16 @@ the measured sessions gives (45k + 218k) / 2 = 131k, against 135k measured.
 
 ## Post-cut size and cost per turn
 
-The scan read 2,951 local transcript files. Parent-session cuts dated 2026-10-01 onward only:
-623 exo-compact cuts in 122 sessions and 159 native cuts in 25 sessions. These are transcript
-observations, not a controlled comparison.
+The scan read 2,952 local transcript files. Parent-session cuts dated 2026-10-01 onward only:
+623 exo-compact cuts in 122 sessions and 160 native cuts in 25 sessions. Data cutoff (scan
+started): 2026-11-11 05:14:06 UTC. These are transcript observations, not a controlled comparison.
 
 **Post-cut context and boundary metadata.** Each cell gives `n`, median, IQR, and range in tokens.
 
 | | Sessions / cuts | First-call context | `preTokens` | `postTokens` |
 |---|---:|---:|---:|---:|
 | exo-compact | 122 / 623 | n=617; 44,985; 41,608-52,047; 20,596-81,790 | n=623; 217,509; 217,006-218,180; 28,086-260,191 | n=623; 5,016; 4,232-5,321; 489-21,396 |
-| Native | 25 / 159 | n=155; 65,436; 56,524-77,535; 16,924-99,724 | n=159; 217,413; 216,892-218,573; 22,392-230,972 | n=159; 17,926; 13,662-22,601; 1,351-35,636 |
+| Native | 25 / 160 | n=156; 65,484; 56,651-77,523; 16,924-99,724 | n=160; 217,387; 216,893-218,573; 22,392-230,972 | n=160; 18,018; 13,702-22,550; 1,351-35,636 |
 
 **Cumulative cost after the cut.** These are input-token equivalents for the first 1, 5, or 20
 assistant calls, not a per-call average. The table uses the 100k-350k `preTokens` proxy band.
@@ -248,12 +248,12 @@ Dollar medians use $5 per million equivalents.
 | exo-compact | 1 | 580 | 44,574 ($0.223) | 34,419-57,854 | 19,695-113,520 |
 | exo-compact | 5 | 578 | 109,298 ($0.546) | 91,153-126,100 | 62,295-344,178 |
 | exo-compact | 20 | 568 | 319,744 ($1.599) | 280,194-373,137 | 196,179-775,554 |
-| Native | 1 | 151 | 92,993 ($0.465) | 73,989-108,300 | 41,741-149,492 |
-| Native | 5 | 151 | 153,696 ($0.768) | 122,671-180,137 | 83,305-430,943 |
-| Native | 20 | 149 | 392,584 ($1.963) | 332,502-455,835 | 218,641-980,335 |
+| Native | 1 | 152 | 93,470 ($0.467) | 74,240-108,544 | 41,741-149,492 |
+| Native | 5 | 152 | 153,370 ($0.767) | 122,853-180,083 | 83,305-430,943 |
+| Native | 20 | 150 | 391,920 ($1.960) | 333,101-454,890 | 218,641-980,335 |
 
 In this proxy band, first-call context was n=580, median 45,657 (IQR 42,303-52,634; range
-22,874-81,790) for exo-compact, and n=151, median 65,582 (IQR 57,034-77,618; range
+22,874-81,790) for exo-compact, and n=152, median 65,675 (IQR 57,117-77,589; range
 43,357-99,724) for native.
 
 **Pre-cut proxy groups.** Configured window size is not consistently recorded, so these are
@@ -261,7 +261,7 @@ pre-cut-token bands, not verified settings.
 
 | `preTokens` band | exo-compact cuts (sessions) | Native cuts (sessions) |
 |---|---:|---:|
-| 100k-350k proxy | 580 (100) | 151 (17) |
+| 100k-350k proxy | 580 (100) | 152 (17) |
 | At least 500k proxy | 0 (0) | 0 (0) |
 | Other | 43 (22) | 8 (8) |
 
@@ -270,35 +270,48 @@ proxy-band cuts are clustered within sessions, so the IQRs describe cuts rather 
 sessions.
 
 **Cut cost and card-refresh allowance.** Native summary-call API usage is not recorded in the
-transcripts. Its compact-summary text is present in 156 native records; characters divided by four
-estimates output tokens, with n=156, median 3,782, IQR 3,311-4,474, and range 492-6,602.
+transcripts. Its compact-summary text is present in 157 native records; characters divided by four
+estimates output tokens, with n=157, median 3,792, IQR 3,323-4,474, and range 492-6,602.
 Using the optimistic assumption that the call reads all `preTokens` as cache reads, the approximate
-native summary-call lower bound is `0.1 x preTokens + 5 x estimated output tokens`: n=156, median
-40,453, IQR 38,051-43,949, and range 5,644-53,672 equivalents (about $0.20 at the median). This
-is a lower bound, not measured billed usage, and the chars/4 output estimate is approximate.
+native summary-call lower bound is `0.1 x preTokens + 5 x estimated output tokens`: n=157, median
+40,520, IQR 38,065-43,941, and range 5,644-53,672 equivalents (about $0.20 at the median). This
+is a lower bound on the call cost under those assumptions; the chars/4 output estimate is approximate.
 
 Local capture notices emitted by `plugin/compact/compact.ts` record `task_card.refresh=start
-ctx=...` and, for successful writes, `task_card.refresh=written size=...`. For 400 paired notices
-since 2026-10-01, `0.1 x refresh context + 5 x recorded written-card size` gives an approximate
-card-refresh lower bound with median 29,342, IQR 26,864-32,942, and range 20,355-39,660 input-token
-equivalents. These notices do not record model usage; the estimate treats context as cache reads
-and uses the plugin's recorded card-size estimate.
+ctx=...` and, for successful writes, `task_card.refresh=written size=...`. The 400 paired refresh
+notices since 2026-10-01 come from 9 of the 122 exo sessions. The formula
+`0.1 x refresh context + 5 x recorded written-card size` gives an approximate card-refresh estimate
+with n=400, median 29,342, IQR 26,864-32,942, and range 20,355-39,660 input-token equivalents.
+The plugin's recorded card size is a conservative-high token estimate and can exceed actual output,
+so this card figure is approximate and is not a strict lower bound. The notices do not record actual
+model usage.
 
-The allowance for exo's extra cut cost, including a card refresh, is the native summary-call lower
-bound plus the native post-cut cumulative median minus the exo-compact post-cut cumulative median.
-The post-cut cost medians are from unpaired samples in the 100k-350k `preTokens` proxy band. Exo
-stays cheaper through k calls while its extra per-cut cost is below this indicative allowance:
+To compare card refreshes with an allowance per cut, refresh estimates are summed over the same
+session interval, from the previous cut boundary through the boundary ending that interval. In the
+9 notice-bearing sessions, there are 231 exo cuts. Across those cuts, refreshes per cut have median
+1, IQR 0-1.5, and max 13 (n=231 cuts); 129 cuts have at least one recorded refresh and 102 have
+no successful notice. Among the 129 refreshed cuts, refresh count is median 1, IQR 1-3, and max 13.
+Their summed card estimate per cut is n=129, median 31,474, IQR 27,693-90,671, and range
+20,920-439,463 equivalents. Missing notices do not prove that a cut had no refresh.
 
-| Post-cut calls (k) | Card-refresh allowance (equivalents) | n: summary bound / native / exo |
-|---:|---:|---:|
-| 1 | 88,872 | 156 / 151 / 580 |
-| 5 | 84,852 | 156 / 151 / 578 |
-| 20 | 113,293 | 156 / 149 / 568 |
+The indicative extra exo cost allowance per cut is the native summary-call approximate lower bound
+plus the native post-cut cumulative median minus the exo-compact post-cut cumulative median. It
+applies to all extra exo cost for a cut. The post-cut cost medians are from unpaired samples in the
+100k-350k `preTokens` proxy band. The table compares the summed card estimate for each refreshed cut
+with that per-cut allowance:
 
-These are allowances, not measured break-even points. They combine medians from unpaired cut
-cohorts with the median of an approximate native lower bound. The captured card-refresh lower bound
-does not establish whether actual refresh usage is below any allowance; actual API usage remains
-unmeasured.
+| Post-cut calls (k) | Indicative extra exo cost allowance per cut (equivalents) | n: summary bound / native / exo | Refreshed cuts above allowance | Share of 129 refreshed cuts |
+|---:|---:|---:|---:|---:|
+| 1 | 89,417 | 157 / 152 / 580 | 33 / 129 | 25.6% |
+| 5 | 84,593 | 157 / 152 / 578 | 37 / 129 | 28.7% |
+| 20 | 112,696 | 157 / 150 / 568 | 19 / 129 | 14.7% |
+
+The recorded summed estimate is above the corresponding allowance for about 26%, 29%, and 15% of
+refreshed cuts at k=1, 5, and 20. This shows why comparing one refresh's median with a per-cut
+allowance understates how often summed refresh estimates reach the threshold. These exceedances do
+not establish actual API spend above the allowance or an observed break-even point: the card-size
+estimate can run high, notice coverage is incomplete, and the post-cut cohorts are unpaired. Actual
+refresh usage is not recorded.
 
 **Method.** The analysis covered local transcripts from 2026-10-01 onward, including subagent
 transcripts; only parent-session boundaries contribute to cut samples. A cut is classified by the
@@ -317,7 +330,8 @@ verified settings.
 **Caveats.** The two kinds are different sessions doing different tasks, with a different model mix;
 this is not a controlled A/B. Some cuts lack a following assistant usage record, and fewer have 5 or
 20 calls before the next cut. Window labels are inferred. The allowance combines unpaired median
-post-cut costs with an approximate lower bound; actual card-refresh usage is unavailable.
+post-cut costs with an approximate native summary-call lower bound; actual card-refresh usage is
+unavailable.
 
 ## Earlier measurements
 
