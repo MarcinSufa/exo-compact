@@ -91,6 +91,10 @@ export function weightedUsage(usage) {
     + 5 * (usage.output_tokens ?? 0);
 }
 
+export function estimateCardRefreshEquivalent(contextTokens, cardSizeTokens) {
+  return 0.1 * contextTokens + 5 * cardSizeTokens;
+}
+
 function summarize(values) {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   const quantile = (p) => {
@@ -259,7 +263,7 @@ async function analyzeTranscript(file, since, output) {
         pendingCardRefreshContext = { time, context: Number(refreshStart[1]), span: cardRefreshSpan };
       } else if (refreshWritten) {
         if (pendingCardRefreshContext && pendingCardRefreshContext.time >= since && time >= since) {
-          const estimate = 0.1 * pendingCardRefreshContext.context + 5 * Number(refreshWritten[1]);
+          const estimate = estimateCardRefreshEquivalent(pendingCardRefreshContext.context, Number(refreshWritten[1]));
           output.cardRefreshNotices.push({ session: file, estimate });
           pendingCardRefreshContext.span.push(estimate);
         }
