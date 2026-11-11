@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { captureSnapshotAt, cardFromSeedText, messagesAtBoundary, messagesThroughBoundary, createMemoryOverlay, historicalCaptureFiles, makeHost, matchBoundaries, realTokenCountForCut, replaySeedMetrics, restoreTaskCardForCut, restoreTaskCardHorizonForCut } from './fallback-replay.mjs';
+import { captureSnapshotAt, cardFromSeedText, discoverData, messagesAtBoundary, messagesThroughBoundary, createMemoryOverlay, historicalCaptureFiles, makeHost, matchBoundaries, matchSessionBoundaries, realTokenCountForCut, replaySeedMetrics, restoreTaskCardForCut, restoreTaskCardHorizonForCut } from './fallback-replay.mjs';
 
 test('the cut budget-count notice selects the replay token counter', () => {
   assert.equal(realTokenCountForCut({ noticeLines: [{ body: 'seed.budget_total=20000 seed.budget_count=real' }] }), true);
@@ -116,7 +116,11 @@ test('a numbered capture segment keeps its birthtime visibility after a later ap
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fallback-replay-segment-'));
   const file = path.join(dir, 'segment-000001.json');
   const hash = 'a'.repeat(64);
-  const text = `${JSON.stringify({ sourceHash: `${hash}#1:fixture`, body: { text: 'fixture record' } })}\n`;
+  const otherHash = 'b'.repeat(64);
+  const text = [
+    JSON.stringify({ sourceHash: `${hash}#1:fixture`, body: { text: 'active record' } }),
+    JSON.stringify({ sourceHash: `${otherHash}#1:fixture`, body: { text: 'inactive record' } }),
+  ].join('\n') + '\n';
   try {
     fs.writeFileSync(file, text);
     const created = fs.statSync(file);
@@ -134,18 +138,58 @@ test('a numbered capture segment keeps its birthtime visibility after a later ap
       birthtimeMs: created.birthtimeMs,
     }], cutAt, new Set([hash]));
     assert.equal(historical.byName.has('segment-000001.json'), true);
-    assert.deepEqual(historical.identityFilter, { tagged: 1, matched: 1, dropped: 0, opaque: 0, opaqueIncluded: 0 });
+    assert.deepEqual(historical.byName.get('segment-000001.json').split('\n').filter(Boolean).map((line) => JSON.parse(line).body.text), ['active record']);
+    assert.deepEqual(historical.identityFilter, { tagged: 2, matched: 1, dropped: 1, opaque: 0, opaqueIncluded: 0 });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('boundary matching enforces cut direction, duration alignment, and the five-minute window', () => {
   const cut = { startedAt: '2026-11-05T12:00:00.000Z', completedAt: '2026-11-05T12:00:01.000Z' };
-  const before = { index: 1, at: Date.parse(cut.startedAt) - 1_000, event: { compactMetadata: {} } };
+  const skewEdge = { index: 1, at: Date.parse(cut.startedAt) - 400, event: { compactMetadata: {} } };
+  const beyondSkew = { index: 2, at: Date.parse(cut.startedAt) - 401, event: { compactMetadata: {} } };
   const tooFar = { index: 2, at: Date.parse(cut.completedAt) + 5 * 60_000 + 1, event: { compactMetadata: {} } };
   const wrongDuration = { index: 3, at: Date.parse(cut.startedAt) + 12_000, event: { compactMetadata: { durationMs: 1_000 } } };
-  assert.equal(matchBoundaries([cut], [before]).has(cut), false);
+  assert.equal(matchBoundaries([cut], [skewEdge]).has(cut), true);
+  assert.equal(matchBoundaries([cut], [beyondSkew]).has(cut), false);
   assert.equal(matchBoundaries([cut], [tooFar]).has(cut), false);
   assert.equal(matchBoundaries([cut], [wrongDuration]).has(cut), false);
+});
+
+test('boundary matching does not let a later cut steal an earlier cut boundary', () => {
+  const first = { startedAt: '2026-11-05T12:00:00.000Z', completedAt: '2026-11-05T12:00:01.000Z' };
+  const next = { startedAt: '2026-11-05T12:00:10.000Z', completedAt: '2026-11-05T12:00:11.000Z' };
+  const beforeNext = { index: 1, at: Date.parse(next.startedAt) - 1, event: { compactMetadata: {} } };
+  const atNext = { index: 2, at: Date.parse(next.startedAt), event: { compactMetadata: {} } };
+  assert.equal(matchBoundaries([first], [beforeNext], [first, next]).has(first), true);
+  assert.equal(matchBoundaries([first], [atNext], [first, next]).has(first), false);
+});
+
+test('a notices-before selection still caps its last cut at the next cut in the full log', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fallback-replay-notices-before-'));
+  const captureRoot = path.join(dir, 'capture');
+  const projectsRoot = path.join(dir, 'projects');
+  const sessionId = 'fixture-session';
+  const sessionDir = path.join(captureRoot, sessionId);
+  const projectDir = path.join(projectsRoot, 'fixture-project');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  const firstStart = '2026-11-05T12:00:00.000Z';
+  const nextStart = '2026-11-05T12:00:10.000Z';
+  fs.writeFileSync(path.join(sessionDir, 'notices.log'), [
+    `${firstStart} compact.sizeBefore=10000`,
+    '2026-11-05T12:00:00.500Z seed.budget_over seed=5277/5260 tail=5000/4500 total=10277',
+    '2026-11-05T12:00:01.000Z compact.fallback=budget reason=budget',
+    `${nextStart} compact.sizeBefore=10000`,
+    '2026-11-05T12:00:11.000Z compacted ok',
+  ].join('\n'));
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), '');
+  try {
+    const [session] = discoverData(captureRoot, projectsRoot, Date.parse('2026-11-05T12:00:02.000Z'));
+    assert.equal(session.cuts.length, 1);
+    assert.equal(session.allCuts.length, 2);
+    const boundary = { index: 1, at: Date.parse(nextStart), event: { compactMetadata: {} } };
+    assert.equal(matchSessionBoundaries(session, session.fallbacks, [boundary]).has(session.fallbacks[0]), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('transcript messages after the target compact boundary are excluded', () => {
@@ -218,8 +262,26 @@ test('the replay host keeps fs writes in memory and process runs inert', async (
     const code = `require('node:fs').writeFileSync(${JSON.stringify(processMarker)}, 'launched')`;
     await host.process.run([process.execPath, '-e', code]);
     assert.equal(fs.existsSync(processMarker), false);
-    await assert.rejects(host.http.fetch('fixture-url'));
+    await assert.rejects(host.http.fetch('http://127.0.0.1:9/'), { code: 'REPLAY_HTTP_DISABLED' });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fallback seed metrics do not count the passthrough transcript message as a seed', () => {
+  const metrics = replaySeedMetrics({
+    result: {
+      messages: [{ role: 'user', text: 'the original transcript message', toolUses: [], toolResults: [] }],
+      tokensAfter: 5,
+    },
+    fellBack: true,
+    logs: ['seed.budget_over seed=5277/5260 tail=5000/4500 total=10277'],
+    realTokenCount: false,
+    budgetCore: {
+      estimateTokens: () => 999,
+      serializedTokens: (messages, countTokens) => messages.reduce((sum, message) => sum + countTokens(message.text), 0),
+    },
+  });
+  assert.equal(metrics.seedTokens, null);
+  assert.equal(metrics.seedMargin, null);
 });
 
 test('replay seed size and margin use the cut token counter and handler result', () => {
@@ -240,4 +302,26 @@ test('replay seed size and margin use the cut token counter and handler result',
     },
   });
   assert.deepEqual(metrics, { seedTokens: 3, tokensAfter: 10, seedBudget: 13, seedMargin: 10 });
+});
+
+test('card seed allowance reserves its effective tail budget when the returned tail exceeds it', () => {
+  const metrics = replaySeedMetrics({
+    result: {
+      messages: [{ role: 'assistant', text: 'abc', toolUses: [], toolResults: [] }],
+      tokensAfter: 18,
+    },
+    logs: [
+      'seed.budget_total=20 seed.budget_count=chars4',
+      'seed.budget_split seed=12 tail=8 dense=3',
+      'seed.task_card=1 seed.task_card_size=12',
+    ],
+    realTokenCount: false,
+    budgetCore: {
+      estimateTokens: () => 999,
+      serializedTokens: (messages, countTokens) => messages.reduce((sum, message) => sum + countTokens(message.text), 0),
+    },
+  });
+  assert.equal(metrics.seedTokens, 1);
+  assert.equal(metrics.seedBudget, 12);
+  assert.equal(metrics.seedMargin, 11);
 });
