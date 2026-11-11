@@ -426,11 +426,15 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
   });
   const cardRefreshNoticeSessions = new Set((summaryMetrics.cardRefreshNotices ?? []).map((notice) => notice.session));
   const cutsInNoticeSessions = withSession.filter((cut) => cut.kind === 's4' && cardRefreshNoticeSessions.has(cut._session));
+  const refreshesAssignedToNativeCuts = withSession
+    .filter((cut) => cut.kind === 'native' && cardRefreshNoticeSessions.has(cut._session))
+    .reduce((sum, cut) => sum + cut.cardRefreshCount, 0);
   const refreshedCuts = cutsInNoticeSessions.filter((cut) => cut.cardRefreshCount > 0);
   const cardRefreshByCut = {
     sessionsWithNotices: cardRefreshNoticeSessions.size,
     cutsInNoticeSessions: cutsInNoticeSessions.length,
     cutsWithRecordedRefreshes: refreshedCuts.length,
+    refreshesAssignedToNativeCuts,
     refreshesPerCut: summarize(cutsInNoticeSessions.map((cut) => cut.cardRefreshCount)),
     refreshesPerRefreshedCut: summarize(refreshedCuts.map((cut) => cut.cardRefreshCount)),
     approximateEstimatePerCut: summarize(cutsInNoticeSessions.map((cut) => cut.cardRefreshEstimate)),
@@ -545,6 +549,7 @@ function printReport(report) {
   console.log(`Native summary-call approximate lower bound (0.1 x preTokens + 5 x summary estimate): ${formatStats(report.nativeSummaryLowerBound)} input-token equivalents`);
   console.log(`Card-refresh approximate estimate (not a strict lower bound; 0.1 x refresh context + 5 x recorded written-card size; ${report.cardRefreshApproximateEstimate.n} paired refresh notices in ${report.cardRefreshApproximateEstimate.sessionsWithNotices} of ${report.cuts.s4.sessions} exo sessions): ${formatStats(report.cardRefreshApproximateEstimate)} input-token equivalents`);
   console.log(`Notice-bearing sessions: ${report.cardRefreshByCut.cutsWithRecordedRefreshes}/${report.cardRefreshByCut.cutsInNoticeSessions} exo cuts have recorded refreshes; refresh count across all cuts ${formatStats(report.cardRefreshByCut.refreshesPerCut)}; among refreshed cuts ${formatStats(report.cardRefreshByCut.refreshesPerRefreshedCut)} and summed estimate ${formatStats(report.cardRefreshByCut.approximateEstimatePerRefreshedCut)} equivalents`);
+  console.log(`Refreshes assigned to native cuts in notice-bearing sessions (excluded from exo per-cut comparison): ${format(report.cardRefreshByCut.refreshesAssignedToNativeCuts)}`);
   console.log('Indicative extra exo cost allowance per cut: native summary-call approximate lower bound plus native post-cut median minus exo post-cut median; post-cut medians are from unpaired samples.');
   for (const allowance of report.breakEven.extraExoCutCostAllowanceByCalls) {
     console.log(`  after ${allowance.calls} calls: ${format(allowance.median)} equivalents (n=${allowance.n.summaryBound} summary bounds, ${allowance.n.native} native cuts, ${allowance.n.s4} exo cuts)`);

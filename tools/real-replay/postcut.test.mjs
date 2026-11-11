@@ -114,6 +114,49 @@ test('card-refresh allowance uses the native bound plus the native and exo media
   ]);
 });
 
+test('allowance exceedance is strict and scoped to refreshed s4 cuts in notice-bearing sessions', () => {
+  const proxyCuts = [
+    ...[0, 0, 10, 100].map((cost, index) => ({ kind: 's4', window: '200k', _session: `s4-${index}`, callCosts: Array(20).fill(cost) })),
+    ...[0, 50, 100, 100].map((cost, index) => ({ kind: 'native', window: '200k', _session: `native-${index}`, callCosts: Array(20).fill(cost) })),
+  ];
+  const refreshedEstimates = [119, 120, 121, 400, 401, 1450, 1451];
+  const noticeSessionCuts = [
+    ...refreshedEstimates.map((estimate) => ({
+      kind: 's4', window: 'other', _session: 'notice-session', callCosts: [],
+      cardRefreshCount: 1, cardRefreshEstimate: estimate,
+    })),
+    ...[0, 0].map(() => ({
+      kind: 's4', window: 'other', _session: 'notice-session', callCosts: [],
+      cardRefreshCount: 0, cardRefreshEstimate: 0,
+    })),
+    {
+      kind: 'native', window: 'other', _session: 'notice-session', callCosts: [],
+      cardRefreshCount: 1, cardRefreshEstimate: 10_000,
+    },
+    {
+      kind: 's4', window: 'other', _session: 'session-without-notices', callCosts: [],
+      cardRefreshCount: 0, cardRefreshEstimate: 0,
+    },
+  ];
+  const report = aggregatePostCuts([...proxyCuts, ...noticeSessionCuts], {
+    nativeSummaryOutput: [],
+    nativeSummaryLowerBounds: [40, 60],
+    cardRefreshNotices: [
+      ...refreshedEstimates.map((estimate) => ({ session: 'notice-session', estimate })),
+      { session: 'notice-session', estimate: 10_000 },
+    ],
+  }, proxyCuts.length + noticeSessionCuts.length, '2026-10-01');
+
+  assert.equal(report.cardRefreshByCut.cutsInNoticeSessions, 9);
+  assert.equal(report.cardRefreshByCut.cutsWithRecordedRefreshes, 7);
+  assert.equal(report.cardRefreshByCut.refreshesAssignedToNativeCuts, 1);
+  assert.deepEqual(report.cardRefreshByCut.allowanceExceedance, [
+    { calls: 1, allowance: 120, n: 5, denominator: 7, share: 5 / 7 },
+    { calls: 5, allowance: 400, n: 3, denominator: 7, share: 3 / 7 },
+    { calls: 20, allowance: 1450, n: 1, denominator: 7, share: 1 / 7 },
+  ]);
+});
+
 test('postcut comparison subtracts interpolated medians from unpaired cohorts', () => {
   const cuts = [
     ...[0, 0, 10, 100].map((cost, index) => ({ kind: 's4', window: '200k', _session: `s4-${index}`, callCosts: [cost] })),
@@ -210,40 +253,44 @@ test('--since filters both the refresh start and written notice', () => {
   }
 });
 
-test('card refresh estimates are summed within the interval ending at each cut', () => {
+test('refreshes go to the next cut and a notice after the final boundary is unassigned', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-sum-'));
   const reportPath = path.join(root, 'aggregate.json');
   writeEvents(path.join(root, 'parent.jsonl'), [
     boundary('2026-10-10T12:00:00.000Z'),
     event('user', { timestamp: '2026-10-10T12:00:01.000Z', message: { content: '[[exovault:s4-seed:v1]] first' } }),
-    assistant('first-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:00:02.000Z'),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
     event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
-    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:12.000Z', content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
-    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:00:13.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
     boundary('2026-10-10T12:01:00.000Z'),
-    event('user', { timestamp: '2026-10-10T12:01:01.000Z', message: { content: '[[exovault:s4-seed:v1]] second' } }),
-    assistant('second-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:01:02.000Z'),
+    event('user', {
+      timestamp: '2026-10-10T12:01:01.000Z',
+      isCompactSummary: true,
+      message: { content: 'This session is being continued from a previous conversation.' },
+    }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=20000 window=250000 n=2' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:01:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
     boundary('2026-10-10T12:02:00.000Z'),
     event('user', { timestamp: '2026-10-10T12:02:01.000Z', message: { content: '[[exovault:s4-seed:v1]] third' } }),
-    assistant('third-cut-call', usage(10, 20, 30, 4), '2026-10-10T12:02:02.000Z'),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:10.000Z', content: 'exo-compact: task_card.refresh=start ctx=30000 window=250000 n=3' }),
+    event('system', { subtype: 'informational', timestamp: '2026-10-10T12:02:11.000Z', content: 'exo-compact: task_card.refresh=written size=200' }),
   ]);
   try {
     const run = analyze(root, reportPath);
     assert.equal(run.status, 0, run.stderr);
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-    assert.equal(report.cardRefreshApproximateEstimate.n, 2);
+    assert.equal(report.cardRefreshApproximateEstimate.n, 3);
     assert.equal(report.cardRefreshApproximateEstimate.sessionsWithNotices, 1);
-    assert.equal(report.cardRefreshByCut.cutsInNoticeSessions, 3);
+    assert.equal(report.cardRefreshByCut.cutsInNoticeSessions, 2);
     assert.equal(report.cardRefreshByCut.cutsWithRecordedRefreshes, 1);
+    assert.equal(report.cardRefreshByCut.refreshesAssignedToNativeCuts, 1);
     assert.deepEqual(report.cardRefreshByCut.refreshesPerCut, {
-      n: 3, median: 0, q1: 0, q3: 1, min: 0, max: 2,
+      n: 2, median: 0.5, q1: 0.25, q3: 0.75, min: 0, max: 1,
     });
-    assert.deepEqual(report.cardRefreshByCut.refreshesPerRefreshedCut, {
-      n: 1, median: 2, q1: 2, q3: 2, min: 2, max: 2,
+    assert.deepEqual(report.cardRefreshByCut.approximateEstimatePerCut, {
+      n: 2, median: 1500, q1: 750, q3: 2250, min: 0, max: 3000,
     });
     assert.deepEqual(report.cardRefreshByCut.approximateEstimatePerRefreshedCut, {
-      n: 1, median: 5000, q1: 5000, q3: 5000, min: 5000, max: 5000,
+      n: 1, median: 3000, q1: 3000, q3: 3000, min: 3000, max: 3000,
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

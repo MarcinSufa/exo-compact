@@ -287,8 +287,10 @@ so this card figure is approximate and is not a strict lower bound. The notices 
 model usage.
 
 To compare card refreshes with an allowance per cut, refresh estimates are summed over the same
-session interval, from the previous cut boundary through the boundary ending that interval. In the
-9 notice-bearing sessions, there are 231 exo cuts. Across those cuts, refreshes per cut have median
+session interval, from the previous cut boundary through the boundary ending that interval. Of the
+400 paired refreshes, 103 fall in intervals ending at native cuts in mixed sessions and are left
+out of this exo-only per-cut comparison. In the 9 notice-bearing sessions, there are 231 exo cuts.
+Across those cuts, refreshes per cut have median
 1, IQR 0-1.5, and max 13 (n=231 cuts); 129 cuts have at least one recorded refresh and 102 have
 no successful notice. Among the 129 refreshed cuts, refresh count is median 1, IQR 1-3, and max 13.
 Their summed card estimate per cut is n=129, median 31,474, IQR 27,693-90,671, and range
