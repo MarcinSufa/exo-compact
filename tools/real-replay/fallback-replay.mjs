@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
 import { fakeHost } from '../../plugin/compact/__gate-s4__/fixtures/helpers.ts';
 
-const HOME = process.env.HOME ?? '/home/agent';
+const HOME = os.homedir();
 const CAPTURE_ROOT = path.join(HOME, '.exovault/s4-capture');
 const PROJECTS_ROOT = path.join(HOME, '.claude/projects');
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
