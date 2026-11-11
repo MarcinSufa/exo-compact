@@ -228,6 +228,9 @@ the measured sessions gives (45k + 218k) / 2 = 131k, against 135k measured.
 
 ## Post-cut size and cost per turn
 
+For a local replay of the batch observation-masking option before the seed route, see the
+[observation masking analysis](observation-masking.md).
+
 The scan read 2,952 local transcript files. Parent-session cuts dated 2026-10-01 onward only:
 623 exo-compact cuts in 122 sessions and 160 native cuts in 25 sessions. Data cutoff (scan
 started): 2026-11-11 05:14:06 UTC. These are transcript observations, not a controlled comparison.

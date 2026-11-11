@@ -25,7 +25,8 @@ const READ_BASH = /(?:^|[;&|(]\s*)(?:cat|head|tail|sed -n \S+|less|wc -l)(?:\s+-
 const RECOVERY_TOOL_WINDOW = 20;
 const IDLE_S = 120;
 
-const eventContent = (e) => (e.message && typeof e.message === 'object' ? e.message.content : e.content);
+export const transcriptContent = (e) => (e.message && typeof e.message === 'object' ? e.message.content : e.content);
+const eventContent = transcriptContent;
 const eventText = (e) => {
   const c = eventContent(e);
   if (typeof c === 'string') return c;
@@ -36,7 +37,7 @@ const eventTime = (e) => Date.parse(e.timestamp ?? '') || 0;
 export const timestamp = eventTime;
 export const isCompactBoundary = (e) => e?.type === 'system' && e?.subtype === 'compact_boundary';
 
-function parseTranscriptLine(line) {
+export function parseTranscriptLine(line) {
   if (line === '') return { event: undefined, malformed: false };
   try { return { event: JSON.parse(line), malformed: false }; }
   catch { return { event: undefined, malformed: true }; }
@@ -53,11 +54,11 @@ export function parseTranscript(text) {
   return { events, malformed };
 }
 
-const isSubagentPath = (file) => file.split(path.sep).includes('subagents');
+export const isSubagentPath = (file) => file.split(path.sep).includes('subagents');
 const toolUses = (e) => (e.type === 'assistant' && Array.isArray(eventContent(e)) ? eventContent(e).filter((b) => b.type === 'tool_use') : []);
 const isRealUser = (e) => e.type === 'user' && !e.isMeta && !e.isCompactSummary && typeof eventContent(e) === 'string' && !eventContent(e).startsWith(SEED) && !eventContent(e).startsWith('<');
 
-function readPaths(tool) {
+export function readPaths(tool) {
   const input = tool.input ?? {};
   if (tool.name === 'Read' || tool.name === 'NotebookRead') return [String(input.file_path ?? '')].filter(Boolean);
   if (tool.name === 'Bash') return [...String(input.command ?? '').matchAll(READ_BASH)].map((match) => match[1]).filter((p) => /[/.]/.test(p));
@@ -115,7 +116,7 @@ export function estimateCardRefreshEquivalent(contextTokens, cardSizeTokens) {
   return 0.1 * contextTokens + 5 * cardSizeTokens;
 }
 
-function summarize(values) {
+export function summarize(values) {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   const quantile = (p) => {
     if (!sorted.length) return null;
@@ -168,7 +169,7 @@ function makeCut(e, sequence, session) {
   };
 }
 
-function windowName(preTokens) {
+export function windowName(preTokens) {
   if (!Number.isFinite(preTokens)) return 'other';
   if (preTokens >= 500_000) return '1M';
   if (preTokens >= 100_000 && preTokens < 350_000) return '200k';
@@ -499,7 +500,7 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
   };
 }
 
-function expandInputs(inputs) {
+export function expandInputs(inputs) {
   const out = new Set();
   const visit = (input) => {
     let stat;
