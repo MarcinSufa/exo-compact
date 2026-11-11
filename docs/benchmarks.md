@@ -269,28 +269,44 @@ No cut in this sample reached 500k `preTokens`, so there is no measured 1M post-
 proxy-band cuts are clustered within sessions, so the IQRs describe cuts rather than independent
 sessions.
 
-**Cut cost and bounded break-even.** Native summary-call API usage is not recorded in the
+**Cut cost and card-refresh allowance.** Native summary-call API usage is not recorded in the
 transcripts. Its compact-summary text is present in 156 native records; characters divided by four
 estimates output tokens, with n=156, median 3,782, IQR 3,311-4,474, and range 492-6,602.
-Using the optimistic assumption that the call reads all `preTokens` as cache reads, the native
-summary-call lower bound is `0.1 x preTokens + 5 x estimated output tokens`: n=156, median 40,453,
-IQR 38,051-43,949, and range 5,644-53,672 equivalents (about $0.20 at the median). This is a
-bound, not measured billed usage.
+Using the optimistic assumption that the call reads all `preTokens` as cache reads, the approximate
+native summary-call lower bound is `0.1 x preTokens + 5 x estimated output tokens`: n=156, median
+40,453, IQR 38,051-43,949, and range 5,644-53,672 equivalents (about $0.20 at the median). This
+is a lower bound, not measured billed usage, and the chars/4 output estimate is approximate.
 
-In the proxy band, the unpaired median post-cut cost gap is 48,419 equivalents after the first
-call (92,993 native minus 44,574 exo-compact). On that median comparison, the native summary-call
-lower bound is covered after 1 post-cut call, assuming no additional exo cut cost. The result is
-conditional: it excludes the unmeasured card-refresh cost and compares different sessions. Card
-refreshes run through `$.model.fork` and are not represented by transcript usage. Local capture
-notices record refresh context and written-card size, but no model usage, so card-refresh cost is
-not measured (n=0).
+Local capture notices emitted by `plugin/compact/compact.ts` record `task_card.refresh=start
+ctx=...` and, for successful writes, `task_card.refresh=written size=...`. For 400 paired notices
+since 2026-10-01, `0.1 x refresh context + 5 x recorded written-card size` gives an approximate
+card-refresh lower bound with median 29,342, IQR 26,864-32,942, and range 20,355-39,660 input-token
+equivalents. These notices do not record model usage; the estimate treats context as cache reads
+and uses the plugin's recorded card-size estimate.
+
+The allowance for exo's extra cut cost, including a card refresh, is the native summary-call lower
+bound plus the native post-cut cumulative median minus the exo-compact post-cut cumulative median.
+The post-cut cost medians are from unpaired samples in the 100k-350k `preTokens` proxy band. Exo
+stays cheaper through k calls while its extra per-cut cost is below this indicative allowance:
+
+| Post-cut calls (k) | Card-refresh allowance (equivalents) | n: summary bound / native / exo |
+|---:|---:|---:|
+| 1 | 88,872 | 156 / 151 / 580 |
+| 5 | 84,852 | 156 / 151 / 578 |
+| 20 | 113,293 | 156 / 149 / 568 |
+
+These are allowances, not measured break-even points. They combine medians from unpaired cut
+cohorts with the median of an approximate native lower bound. The captured card-refresh lower bound
+does not establish whether actual refresh usage is below any allowance; actual API usage remains
+unmeasured.
 
 **Method.** The analysis covered local transcripts from 2026-10-01 onward, including subagent
 transcripts; only parent-session boundaries contribute to cut samples. A cut is classified by the
 seed marker in its injected message. The first non-synthetic assistant call must have a timestamp
 after the boundary and injected message; retained records with earlier timestamps are excluded,
-and duplicate message IDs count once. Recovery seed text includes injected user text and tool-result
-text within two seconds, preserving the earlier seed-named read calculation. Context is input,
+and duplicate message IDs count once. Recovery records also require a timestamp after the boundary.
+Recovery seed text includes injected user text and tool-result text within two seconds, preserving
+the earlier seed-named read calculation. Context is input,
 cache-write, and cache-read tokens; iteration usage is summed when present. Cost weights are input
 1, 5-minute cache write 1.25, 1-hour cache write 2, cache read 0.1, and output 5; when cache-write
 TTL splits are absent, the write weight falls back to 1.25. Recent transcript usage shows that
@@ -300,8 +316,8 @@ verified settings.
 
 **Caveats.** The two kinds are different sessions doing different tasks, with a different model mix;
 this is not a controlled A/B. Some cuts lack a following assistant usage record, and fewer have 5 or
-20 calls before the next cut. Window labels are inferred. The break-even compares unpaired median
-post-cut costs and a lower bound; the card-refresh cost remains unmeasured.
+20 calls before the next cut. Window labels are inferred. The allowance combines unpaired median
+post-cut costs with an approximate lower bound; actual card-refresh usage is unavailable.
 
 ## Earlier measurements
 

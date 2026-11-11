@@ -235,6 +235,7 @@ function compactSummary(e) {
 async function analyzeTranscript(file, since, output) {
   const subagent = isSubagentPath(file);
   let current = null;
+  let pendingCardRefreshContext = null;
   let sequence = 0;
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
 
@@ -246,6 +247,21 @@ async function analyzeTranscript(file, since, output) {
 
     const time = eventTime(e);
     if (subagent) continue;
+    if (e.type === 'system' && e.subtype === 'informational') {
+      const notice = eventText(e);
+      const refreshStart = /task_card\.refresh=start ctx=(\d+)/.exec(notice);
+      const refreshWritten = /task_card\.refresh=written size=(\d+)/.exec(notice);
+      if (refreshStart) {
+        pendingCardRefreshContext = { time, context: Number(refreshStart[1]) };
+      } else if (refreshWritten) {
+        if (pendingCardRefreshContext && pendingCardRefreshContext.time >= since && time >= since) {
+          output.cardRefreshLowerBounds.push(0.1 * pendingCardRefreshContext.context + 5 * Number(refreshWritten[1]));
+        }
+        pendingCardRefreshContext = null;
+      } else if (/task_card\.refresh=(?:unparsed|no_reply|error)\b/.test(notice)) {
+        pendingCardRefreshContext = null;
+      }
+    }
     if (e.type === 'system' && e.subtype === 'compact_boundary') {
       finalizeCut(current, output);
       current = makeCut(e, sequence, file);
@@ -271,7 +287,7 @@ async function analyzeTranscript(file, since, output) {
       }
     }
 
-    const recoveryEvent = current.injectionTime && time > current.injectionTime + 2000;
+    const recoveryEvent = current.injectionTime && time > current.injectionTime + 2000 && time > current.time;
     if (recoveryEvent) {
       const realUser = isRealUser(e);
       const realAssistant = e.type === 'assistant' && e.message?.model !== '<synthetic>';
@@ -376,6 +392,7 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
   }
   const summaryOutput = summarize(summaryMetrics.nativeSummaryOutput);
   const summaryLowerBound = summarize(summaryMetrics.nativeSummaryLowerBounds);
+  const cardRefreshLowerBound = summarize(summaryMetrics.cardRefreshLowerBounds ?? []);
   const proxyCuts = withSession.filter((cut) => cut.window === '200k');
   const breakEvenRows = CUMULATIVE_CALL_COUNTS.map((n) => {
     const costs = Object.fromEntries(kinds.map((kind) => {
@@ -386,8 +403,19 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
       ? null : costs.native.median - costs.s4.median;
     return { calls: n, s4: costs.s4, native: costs.native, medianGap };
   });
-  const callsToCoverSummaryBound = breakEvenRows.find((row) => row.medianGap != null
-    && summaryLowerBound.median != null && row.medianGap >= summaryLowerBound.median)?.calls ?? null;
+  const cardRefreshCostAllowanceByCalls = CALL_COUNTS.map((calls) => {
+    const row = breakEvenRows.find((candidate) => candidate.calls === calls);
+    return {
+      calls,
+      median: row?.medianGap == null || summaryLowerBound.median == null
+        ? null : summaryLowerBound.median + row.medianGap,
+      n: {
+        summaryBound: summaryLowerBound.n,
+        native: row?.native.n ?? 0,
+        s4: row?.s4.n ?? 0,
+      },
+    };
+  });
   return {
     since: sinceText,
     transcriptsScanned: filesScanned,
@@ -398,9 +426,14 @@ export function aggregatePostCuts(cuts, summaryMetrics, filesScanned, sinceText,
     recovery: recoveryReport(recoveryRows),
     nativeSummaryOutputTokensEstimate: summaryOutput,
     nativeSummaryLowerBound: summaryLowerBound,
+    cardRefreshLowerBound: {
+      source: 'paired local task_card.refresh=start ctx and task_card.refresh=written size notices',
+      assumption: 'Approximate lower bound: refresh context counted as cache reads and recorded card size counted as output tokens.',
+      ...cardRefreshLowerBound,
+    },
     breakEven: {
-      assumption: 'No measured extra exo cut cost; compare unpaired 200k proxy cohort cumulative median costs.',
-      callsToCoverNativeSummaryLowerBound: callsToCoverSummaryBound,
+      assumption: 'Indicative extra exo cut cost allowance from the approximate native summary-call lower bound plus the difference between unpaired 200k proxy cohort cumulative medians.',
+      cardRefreshCostAllowanceByCalls,
       cumulativeMedianSavings: breakEvenRows,
     },
   };
@@ -477,8 +510,12 @@ function printReport(report) {
     }
   }
   console.log(`Native compact-summary output estimate (chars / 4): ${formatStats(report.nativeSummaryOutputTokensEstimate)} tokens`);
-  console.log(`Native summary-call lower bound (0.1 x preTokens + 5 x summary estimate): ${formatStats(report.nativeSummaryLowerBound)} input-token equivalents`);
-  console.log(`200k proxy median savings cover that lower bound after ${report.breakEven.callsToCoverNativeSummaryLowerBound ?? 'more than 20'} post-cut calls, assuming no measured extra exo cut cost`);
+  console.log(`Native summary-call approximate lower bound (0.1 x preTokens + 5 x summary estimate): ${formatStats(report.nativeSummaryLowerBound)} input-token equivalents`);
+  console.log(`Card-refresh approximate lower bound (0.1 x refresh context + 5 x recorded written-card size; ${report.cardRefreshLowerBound.source}): ${formatStats(report.cardRefreshLowerBound)} input-token equivalents`);
+  console.log('Indicative card-refresh allowance: exo stays cheaper while its extra cut cost is below the native summary-call lower bound plus native post-cut median minus exo post-cut median; medians are from unpaired samples.');
+  for (const allowance of report.breakEven.cardRefreshCostAllowanceByCalls) {
+    console.log(`  after ${allowance.calls} calls: ${format(allowance.median)} equivalents (n=${allowance.n.summaryBound} summary bounds, ${allowance.n.native} native cuts, ${allowance.n.s4} exo cuts)`);
+  }
   for (const kind of ['native', 's4']) {
     const grouped = report.recovery[kind];
     printRecovery(`${kind} recovery`, grouped.all);
@@ -493,11 +530,12 @@ function printReport(report) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const files = expandInputs(args.inputs);
-  const internal = { since: args.since, cuts: [], recovery: [], nativeSummaryOutput: [], nativeSummaryLowerBounds: [] };
+  const internal = { since: args.since, cuts: [], recovery: [], nativeSummaryOutput: [], nativeSummaryLowerBounds: [], cardRefreshLowerBounds: [] };
   for (const file of files) await analyzeTranscript(file, args.since, internal);
   const report = aggregatePostCuts(internal.cuts, {
     nativeSummaryOutput: internal.nativeSummaryOutput,
     nativeSummaryLowerBounds: internal.nativeSummaryLowerBounds,
+    cardRefreshLowerBounds: internal.cardRefreshLowerBounds,
   }, files.length, args.sinceText, internal.recovery);
   if (args.jsonOut) fs.writeFileSync(args.jsonOut, `${JSON.stringify(report, null, 2)}\n`);
   printReport(report);

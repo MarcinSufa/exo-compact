@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { weightedUsage } from './postcut.mjs';
+import { aggregatePostCuts, weightedUsage } from './postcut.mjs';
 
 const script = path.join(import.meta.dirname, 'postcut.mjs');
 const stamp = (day, second = 0) => `2026-10-${day}T12:00:${String(second).padStart(2, '0')}.000Z`;
@@ -97,6 +97,75 @@ test('postcut reads TTL splits from transcript usage when iterations carry only 
   }
 });
 
+test('card-refresh allowance uses the native bound plus the native and exo medians at 1, 5, and 20 calls', () => {
+  const cuts = [
+    ...[0, 0, 10, 100].map((cost, index) => ({ kind: 's4', window: '200k', _session: `s4-${index}`, callCosts: Array(20).fill(cost) })),
+    ...[0, 50, 100, 100].map((cost, index) => ({ kind: 'native', window: '200k', _session: `native-${index}`, callCosts: Array(20).fill(cost) })),
+  ];
+  const report = aggregatePostCuts(cuts, {
+    nativeSummaryOutput: [],
+    nativeSummaryLowerBounds: [40, 60],
+  }, cuts.length, '2026-10-01');
+
+  assert.deepEqual(report.breakEven.cardRefreshCostAllowanceByCalls, [
+    { calls: 1, median: 120, n: { summaryBound: 2, native: 4, s4: 4 } },
+    { calls: 5, median: 400, n: { summaryBound: 2, native: 4, s4: 4 } },
+    { calls: 20, median: 1450, n: { summaryBound: 2, native: 4, s4: 4 } },
+  ]);
+});
+
+test('postcut comparison subtracts interpolated medians from unpaired cohorts', () => {
+  const cuts = [
+    ...[0, 0, 10, 100].map((cost, index) => ({ kind: 's4', window: '200k', _session: `s4-${index}`, callCosts: [cost] })),
+    ...[0, 50, 100, 100].map((cost, index) => ({ kind: 'native', window: '200k', _session: `native-${index}`, callCosts: [cost] })),
+  ];
+  const report = aggregatePostCuts(cuts, {
+    nativeSummaryOutput: [],
+    nativeSummaryLowerBounds: [40, 60],
+  }, cuts.length, '2026-10-01');
+  const firstCall = report.breakEven.cumulativeMedianSavings[0];
+
+  assert.equal(firstCall.s4.median, 5);
+  assert.equal(firstCall.native.median, 75);
+  assert.equal(firstCall.medianGap, 70);
+  assert.notEqual(firstCall.medianGap, 25); // paired per-row gaps would give a different result.
+  assert.equal(report.nativeSummaryLowerBound.median, 50);
+});
+
+test('recovery summaries preserve the upper median for even samples', () => {
+  const report = aggregatePostCuts([], {
+    nativeSummaryOutput: [],
+    nativeSummaryLowerBounds: [],
+  }, 0, '2026-10-01', [
+    { kind: 'native', session: 'native-a', window: 1, seedTokens: 10, firstContext: 100, reachedWrite: true, userBeforeWrite: false, toFirstWrite: 2, activeSeconds: 20, cost: 30, pulledTokens: 40, reads: 1, readsNamed: 1, searches: 1, recalls: 0 },
+    { kind: 'native', session: 'native-b', window: 1, seedTokens: 20, firstContext: 200, reachedWrite: true, userBeforeWrite: false, toFirstWrite: 4, activeSeconds: 40, cost: 60, pulledTokens: 80, reads: 2, readsNamed: 0, searches: 2, recalls: 0 },
+  ]);
+
+  assert.equal(report.recovery.native.all.seedTokens.median, 20);
+  assert.equal(report.recovery.native.all.firstContext.median, 200);
+  assert.equal(report.recovery.native.all.costTokens.median, 60);
+});
+
+test('card-refresh lower bound uses paired local context and written-size notices', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-card-notices-'));
+  const reportPath = path.join(root, 'aggregate.json');
+  writeEvents(path.join(root, 'capture-notices.jsonl'), [
+    boundary(stamp('10')),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 1), content: 'exo-compact: task_card.refresh=start ctx=10000 window=250000 n=1' }),
+    event('system', { subtype: 'informational', timestamp: stamp('10', 2), content: 'exo-compact: task_card.refresh=written size=200' }),
+  ]);
+  try {
+    const run = analyze(root, reportPath);
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.cardRefreshLowerBound.n, 1);
+    assert.equal(report.cardRefreshLowerBound.median, 2000);
+    assert.match(report.cardRefreshLowerBound.source, /task_card\.refresh=start ctx.*task_card\.refresh=written size/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('postcut reports aggregate usage, metadata, window costs, and no transcript-derived card cost', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-fixture-'));
   const children = path.join(root, 'subagents');
@@ -147,7 +216,7 @@ test('postcut reports aggregate usage, metadata, window costs, and no transcript
   }
 });
 
-test('a retained assistant record after the boundary line is excluded by its pre-boundary timestamp', () => {
+test('retained pre-boundary records are excluded from post-cut and recovery metrics', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'postcut-boundary-'));
   const reportPath = path.join(root, 'aggregate.json');
   const cutAt = '2026-10-07T12:00:00.000Z';
@@ -161,7 +230,9 @@ test('a retained assistant record after the boundary line is excluded by its pre
     assistant('retained-precut', {
       ...usage(0, 0, 0, 0),
       iterations: [usage(99999, 90000, 80000, 70000)],
-    }, '2026-10-07T11:59:50.000Z'),
+    }, '2026-10-07T11:59:50.000Z', 'claude-sonnet-5-5', [
+      { type: 'tool_use', id: 'retained-read', name: 'Read', input: { file_path: '/retained.mjs' } },
+    ]),
     assistant('valid-postcut', { ...usage(0, 0, 0, 0), iterations: [usage(2, 100, 1000, 10)] }, '2026-10-07T12:00:01.000Z'),
   ];
   writeEvents(path.join(root, 'native.jsonl'), events);
@@ -172,6 +243,7 @@ test('a retained assistant record after the boundary line is excluded by its pre
     assert.equal(report.cuts.native.n, 1);
     assert.equal(report.cuts.native.firstContext.median, 1102);
     assert.equal(report.cuts.native.costByCalls['1'].median, 277);
+    assert.equal(report.recovery.native.all.n, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -207,6 +279,7 @@ test('recovery metrics include injected tool-result text when matching reads to 
     assert.equal(report.nativeSummaryOutputTokensEstimate.n, 1);
     assert.equal(report.nativeSummaryOutputTokensEstimate.median, Math.ceil(summary.length / 4));
     assert.equal(report.nativeSummaryLowerBound.n, 1);
+    assert.equal(report.nativeSummaryLowerBound.median, 0.1 * 205000 + 5 * Math.ceil(summary.length / 4));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
