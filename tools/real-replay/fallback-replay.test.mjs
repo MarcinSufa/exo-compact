@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { captureSnapshotAt, cardFromSeedText, discoverData, messagesAtBoundary, messagesThroughBoundary, createMemoryOverlay, historicalCaptureFiles, makeHost, matchBoundaries, matchSessionBoundaries, realTokenCountForCut, replaySeedMetrics, restoreTaskCardForCut, restoreTaskCardHorizonForCut } from './fallback-replay.mjs';
+import { captureSnapshotAt, cardFromSeedText, discoverData, messagesAtBoundary, messagesThroughBoundary, createMemoryOverlay, historicalCaptureFiles, makeHost, matchBoundaries, matchSessionBoundaries, realTokenCountForCut, replayCut, replaySeedMetrics, restoreTaskCardForCut, restoreTaskCardHorizonForCut, runReplay } from './fallback-replay.mjs';
 
 test('the cut budget-count notice selects the replay token counter', () => {
   assert.equal(realTokenCountForCut({ noticeLines: [{ body: 'seed.budget_total=20000 seed.budget_count=real' }] }), true);
@@ -282,6 +282,99 @@ test('fallback seed metrics do not count the passthrough transcript message as a
   });
   assert.equal(metrics.seedTokens, null);
   assert.equal(metrics.seedMargin, null);
+});
+
+test('fallback row building passes next() into seed metrics', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fallback-replay-row-'));
+  const startedAt = '2026-11-05T12:00:00.000Z';
+  const events = [
+    { type: 'user', timestamp: startedAt, message: { content: 'the original transcript message' } },
+    { type: 'system', subtype: 'compact_boundary', timestamp: startedAt, compactMetadata: { trigger: 'auto' } },
+  ];
+  try {
+    const row = await replayCut({
+      plugin: dir,
+      register(on) {
+        on('session.compact', async (host, _input, next) => {
+          host.ui.log('seed.budget_over seed=5277/5260 tail=5000/4500 total=10277');
+          host.ui.log('compact.fallback=budget reason=budget');
+          return next();
+        });
+      },
+      extractor: { contentIdentity: (message) => message.text },
+      budgetCore: { estimateTokens: () => 1, serializedTokens: () => 17 },
+      session: {
+        sessionId: 'fixture-session',
+        sessionDir: dir,
+        transcriptPath: 'fixture-transcript',
+        events,
+        captureFiles: [],
+      },
+      cut: {
+        ordinal: 1,
+        type: 'fallback',
+        startedAt,
+        completedAt: '2026-11-05T12:00:01.000Z',
+        originalSizeBefore: 10000,
+        originalFallback: 'budget',
+        originalBudgetOver: 'seed.budget_over seed=5277/5260 tail=5000/4500 total=10277',
+        noticeLines: [{ body: 'seed.budget_over seed=5277/5260 tail=5000/4500 total=10277' }],
+      },
+      boundary: { index: 1, at: Date.parse(startedAt), event: events[1] },
+      options: {},
+    });
+
+    assert.equal(row.eligible, true);
+    assert.equal(row.replay.fellBack, true);
+    assert.equal(row.replay.seedTokens, null);
+    assert.equal(row.replay.seedMargin, null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('seed-size diagnostics label the fixed-plugin comparison as trim', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fallback-replay-seed-size-'));
+  const pluginDir = path.join(dir, 'fixture-plugin');
+  const captureRoot = path.join(dir, 'capture');
+  const projectsRoot = path.join(dir, 'projects');
+  const sessionId = 'fixture-session';
+  const sessionDir = path.join(captureRoot, sessionId);
+  const projectDir = path.join(projectsRoot, 'fixture-project');
+  const startedAt = '2026-11-05T12:00:00.000Z';
+  fs.mkdirSync(path.join(pluginDir, 'core'), { recursive: true });
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, '.claude-plugin/plugin.json'), JSON.stringify({ version: 'fixture', userConfig: {} }));
+  fs.writeFileSync(path.join(pluginDir, 'compact.ts'), "export function register(on) { on('session.compact', async () => ({ messages: [{ role: 'assistant', text: 'fixed seed', toolUses: [], toolResults: [] }], tokensAfter: 1 })); }\n");
+  fs.writeFileSync(path.join(pluginDir, 'core/extractor.ts'), 'export function contentIdentity(message) { return message.text ?? ""; }\n');
+  fs.writeFileSync(path.join(pluginDir, 'core/budgets.ts'), [
+    'export function estimateTokens(text) { return Math.ceil(String(text ?? "").length / 4); }',
+    'export function serializedTokens(messages, countTokens) { return messages.reduce((sum, message) => sum + countTokens(message.text), 0); }',
+  ].join('\n'));
+  fs.writeFileSync(path.join(sessionDir, 'notices.log'), [
+    `${startedAt} compact.sizeBefore=10000`,
+    '2026-11-05T12:00:00.500Z seed.budget_total=10000 seed.budget_count=chars4',
+    '2026-11-05T12:00:00.600Z seed.budget_split seed=5000 tail=5000 dense=1000',
+    '2026-11-05T12:00:00.700Z seed.budget_over seed=5277/5260 tail=5000/4500 total=10277',
+    '2026-11-05T12:00:01.000Z compact.fallback=budget reason=budget',
+  ].join('\n'));
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), [
+    JSON.stringify({ type: 'user', timestamp: startedAt, uuid: 'fixture-user', message: { content: [{ type: 'text', text: 'fixture message' }] } }),
+    JSON.stringify({ type: 'system', subtype: 'compact_boundary', timestamp: startedAt, logicalParentUuid: 'fixture-user', compactMetadata: { trigger: 'auto' } }),
+  ].join('\n'));
+  try {
+    const report = await runReplay({
+      pluginDir,
+      captureRoot,
+      projectsRoot,
+      settingsFile: path.join(dir, 'settings.json'),
+    });
+
+    assert.equal(report.diagnostics.seedSize.compared, 1);
+    assert.equal(report.diagnostics.seedSize.medianReplayToLoggedRatio, 3 / 5277);
+    assert.match(report.diagnostics.seedSize.note, /fidelity only for the plugin that logged the cut/);
+    assert.match(report.method.seedSize, /with a fixed plugin, it measures trim against the logged seed/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('replay seed size and margin use the cut token counter and handler result', () => {
