@@ -1,4 +1,4 @@
-# Observation masking replay, round 3
+# Observation masking replay
 
 Scan time: 2026-11-11T23:50:30.106Z UTC. Boundaries dated 2026-10-01 through 2026-11-12, inclusive. The scan read 1,021 main-session transcript files and found 815 cuts: 649 exo seed and 166 native. It skipped no malformed lines and made no API calls. Transcripts under a `subagents` path remain excluded.
 
@@ -16,13 +16,13 @@ For array/object content, the scanner removes image and document base64 payloads
 
 Statistics use the same linear interpolation as `postcut.mjs`. Freed share is freed tokens divided by boundary `preTokens`. Window groups are also reused: 100k to under 350k is the 200k proxy, at least 500k is the 1M proxy, and the remaining values are `other`.
 
-## Calibration and round 1 comparison
+## Image accounting comparison
 
-The text and fixed image estimate for the whole pre-cut context divided by the last assistant-call context usage is n=813, median 0.517 (IQR 0.487..0.545). Round 1 was n=811, median 0.552 (IQR 0.502..0.934). No scale is applied: transcript estimates omit system context and request framing, so applying the whole-context ratio to tool results would attribute those missing tokens to tool outputs.
+With a fixed image/document estimate (current scan), the estimate for the whole pre-cut context divided by the last assistant-call context usage is n=813, median 0.517 (IQR 0.487..0.545). With base64 counted as text (earlier scan, two fewer cuts), it is n=811, median 0.552 (IQR 0.502..0.934). No scale is applied: transcript estimates omit system context and request framing, so applying the whole-context ratio to tool results would attribute those missing tokens to tool outputs.
 
-Round 2 contains two more cuts than round 1, so the differences below include those newly scanned cuts as well as the corrected image/document estimate. Values are rounded to the nearest token.
+The differences below reflect the change from base64 counted as text to a fixed image/document estimate, as well as two additional cuts in the later scan. Values are rounded to the nearest token.
 
-| K | Cohort | Round 1 freed tokens, n; median (IQR) | Round 2 freed tokens, n; median (IQR) | Median change |
+| K | Cohort | Base64 counted as text, n; median (IQR) | Fixed image/document estimate, n; median (IQR) | Median change |
 | ---: | --- | --- | --- | ---: |
 | 5 | All | 813; 43,206 (31,802..119,950) | 815; 36,756 (29,676..43,207) | -6,450 |
 | 5 | Exo seed | 648; 43,222 (32,227..104,855) | 649; 37,665 (30,018..44,207) | -5,557 |
@@ -34,9 +34,9 @@ Round 2 contains two more cuts than round 1, so the differences below include th
 | 20 | Exo seed | 648; 36,719 (27,668..85,238) | 649; 32,725 (26,640..38,656) | -3,994 |
 | 20 | Native | 165; 34,701 (25,867..135,873) | 166; 29,822 (23,609..33,602) | -4,879 |
 
-The Read contribution shows the removed base64 tail directly:
+The Read contribution compares base64 counted as text with a fixed image/document estimate and shows the removed base64 tail directly:
 
-| K | Round 1 Read contribution, n; median (IQR) | Round 2 Read contribution, n; median (IQR) |
+| K | Base64 counted as text, n; median (IQR) | Fixed image/document estimate, n; median (IQR) |
 | ---: | --- | --- |
 | 5 | 479; 55,037 (3,624..178,020) | 480; 3,547 (1,886..7,070) |
 | 10 | 459; 55,309 (3,783..173,312) | 460; 3,435 (1,817..6,786) |
@@ -64,7 +64,7 @@ Deferral divides freed tokens by median context growth across adjacent assistant
 
 ## Matched-horizon cost
 
-Costs are input-token equivalents, using `postcut.mjs` weights: input 1, cache write 1.25, cache read 0.1, and output 5. The masked path pays one batch cache write for the masked context and output on its first call. Each later call pays a cache read of the prior context, a 1.25 cache write for the new tokens at measured median per-call growth, and the same observed output. The real exo or native path uses measured post-cut `weightedUsage` calls. The deferral horizon is rounded up to a whole call and capped at 200. When a transcript has fewer measured calls than N, both paths use median observed output tokens for the missing calls; the real path extends cache reads from its last measured context, increasing by the same growth on each missing call. Extension counts have median zero; maximum added calls were 19 exo and 15 native at 20 calls, and 128/35 at K=5, 127/34 at K=10, and 125/33 at K=20 for the deferral horizon.
+Costs are input-token equivalents, using `postcut.mjs` weights: input 1, cache write 1.25, cache read 0.1, and output 5. The masked path pays one batch cache write for the masked context and output on its first call. Each later call pays a cache read of the prior context, a 1.25 cache write for the new tokens at measured median per-call growth, and the same observed output. The real exo or native path uses measured post-cut `weightedUsage` calls. The deferral horizon is rounded up to a whole call and capped at 200. When a transcript has fewer measured calls than N, both paths use median observed output tokens for the missing calls; the real path extends cache reads from its last measured context, increasing by the same growth on each missing call. This real-path extension past measured calls charges reads and output but no cache write for new tokens, which favours the real path by about 1.25 times median growth per extended call; it cannot change the sign of the median difference. Extension counts have median zero; maximum added calls were 19 exo and 15 native at 20 calls, and 128/35 at K=5, 127/34 at K=10, and 125/33 at K=20 for the deferral horizon.
 
 Each table cell reports the median of per-cut paired differences, masked minus real, and its IQR. Positive values mean masking costs more. The final column is the share of paired cuts where masking is cheaper.
 
@@ -100,30 +100,10 @@ The proxy checks whether a path from a masked result or a retained result appear
 
 ## Hook surface and recommendation
 
-The checked-in type facade exposes no generic pre-request hook that receives and rewrites full conversation history. `prompt.submit` receives only prompt text and optional context. `classic.PostToolUse` can update the just-finished output, but cannot reach old results. `session.compact` receives and may return the full messages list, so it can mask at a compaction boundary. This is the same hook constraint as round 1; no plugin or runtime changes were made.
+The checked-in type facade exposes no generic pre-request hook that receives and rewrites full conversation history. `prompt.submit` receives only prompt text and optional context. `classic.PostToolUse` can update the just-finished output, but cannot reach old results. `session.compact` receives and may return the full messages list, so it can mask at a compaction boundary.
 
 The matched cost results do not support A as a cheaper first route. The paired median difference is positive for every K and path, ranging from +289,273 to +448,001, and masking is cheaper on 0.2% to 5.5% of cuts. The Read replay rates are low, but this path proxy does not establish fidelity or answer quality. A can only be justified by a demonstrated fidelity benefit; this replay supplies no such quality measure. Recommend C: do not add observation masking based on the current evidence.
 
-## Per-test mutant check
-
-Mutants M01 through M14 were named scratch copies of `mask-replay.mjs` under `/tmp/exo-compact-mask-mutants-run2`; M15 was under `/tmp/exo-compact-mask-mutants-run3`. Each had its own unchanged copy of `postcut.mjs`. Each listed test was run alone against its mutant and against the real implementation. All mutants made their target test red; all real-code runs were green.
-
-| Test group | Test | Mutant | Mutant result | Real code |
-| --- | --- | --- | --- | --- |
-| Old | Keeps the last K tool results and masks only older outputs | M01 off-by-one K | Red | Green |
-| Old | Counts the placeholder token size when calculating freed tokens | M02 wrong placeholder token size | Red | Green |
-| Old | Reports zero headroom for a cut with no tool results | M03 false headroom on empty cut | Red | Green |
-| Old | Does not count tool results that appear after the cut boundary | M04 post-cut result leak | Red | Green |
-| Old | Filters cut dates inclusively with since and until | M05 exclusive end date | Red | Green |
-| Old | Estimates deferral from freed tokens divided by median growth | M06 multiply instead of divide | Red | Green |
-| Old | Compares masked and real paths on paired call horizons | M07 missing mask write | Red | Green |
-| Old | Classifies native summaries with the postcut classifier | M08 classify native as exo | Red | Green |
-| Old | Calibrates whole-context text estimates against last-call usage | M09 double context estimate | Red | Green |
-| Old | Skips unparseable lines and reports their count | M10 drop malformed count | Red | Green |
-| Old | Excludes subagent transcript files from main-session totals | M11 include subagents | Red | Green |
-| New | Strips image and document base64 and estimates visual blocks separately | M12 keep base64 payload | Red | Green |
-| New | Reports exact file-path replay for masked and retained Read results | M13 never match read paths | Red | Green |
-| New | Caps the deferral cost horizon at 200 and extends missing calls | M14 remove 200-call cap | Red | Green |
-| New | Extends real-path cost from the last measured context for missing calls | M15 `lastContext = 0` | Red (647 instead of 755) | Green |
+Each test in tools/real-replay/mask-replay.test.mjs was shown red against its own named mutant of mask-replay.mjs; the list is in the pull request.
 
 See also the [post-cut size and cost benchmark](benchmarks.md#post-cut-size-and-cost-per-turn).
