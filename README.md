@@ -411,6 +411,8 @@ method, every measurement and the weak spots, including the ones that do not fla
   key and sends text to TypeSafe only if you turn it on. TypeSafe bills those calls itself, so they
   are not in the cost figures on this page.
 
+Measured post-cut context and per-call cost: [post-cut benchmark](docs/benchmarks.md#post-cut-size-and-cost-per-turn).
+
 Details: [docs/privacy-and-cost.md](docs/privacy-and-cost.md). All options:
 [docs/configuration.md](docs/configuration.md).
 

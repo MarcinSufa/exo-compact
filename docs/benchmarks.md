@@ -226,6 +226,69 @@ the measured sessions gives (45k + 218k) / 2 = 131k, against 135k measured.
 - Whether tokens beyond a certain context size are billed at a different rate depends on the
   model and the plan. That is not counted here.
 
+## Post-cut size and cost per turn
+
+Measured from local transcripts dated 2026-10-01 onward: 620 exo-compact cuts in 122 sessions and
+159 native cuts in 25 sessions. These are transcript observations, not a controlled comparison.
+
+**Post-cut context and boundary metadata.** Each cell gives `n`, median, IQR, and range in tokens.
+
+| | Sessions / cuts | First-call context | `preTokens` | `postTokens` |
+|---|---:|---:|---:|---:|
+| exo-compact | 122 / 620 | n=614; 45,028; 41,626-52,061; 20,596-81,790 | n=620; 217,507; 217,006-218,183; 28,086-260,191 | n=620; 5,017; 4,231-5,324; 489-21,396 |
+| Native | 25 / 159 | n=155; 65,436; 56,524-77,618; 16,413-209,687 | n=159; 217,413; 216,892-218,573; 22,392-230,972 | n=159; 17,926; 13,662-22,601; 1,351-35,636 |
+
+**Cumulative cost after the cut.** These are input-token equivalents for the first 1, 5, or 20
+assistant calls, not a per-call average. Dollar medians use $5 per million equivalents.
+
+| Kind | Calls | n cuts | Median equivalents (median $) | IQR | Range |
+|---|---:|---:|---:|---:|---:|
+| exo-compact | 1 | 577 | 29,836 ($0.149) | 23,241-37,956 | 13,696-73,295 |
+| exo-compact | 5 | 575 | 81,482 ($0.407) | 69,621-94,251 | 48,399-243,221 |
+| exo-compact | 20 | 566 | 272,094 ($1.360) | 240,146-313,751 | 173,118-648,820 |
+| Native | 1 | 151 | 59,849 ($0.299) | 48,032-69,840 | 27,454-99,788 |
+| Native | 5 | 151 | 112,952 ($0.565) | 92,587-132,241 | 64,252-371,045 |
+| Native | 20 | 149 | 335,386 ($1.677) | 282,827-383,660 | 190,299-681,834 |
+
+The cost table uses cuts in the 200k proxy band below to keep both sides at the same observed
+pre-cut scale. In that group, first-call context was n=577, median 45,685 (IQR 42,322-52,648;
+range 22,874-81,790) for exo-compact, and n=151, median 65,582 (IQR 57,034-77,882; range
+43,357-209,687) for native.
+
+**Window groups.** Configured window size is not consistently recorded, so these are pre-cut-token
+bands, not verified settings.
+
+| Pre-cut proxy | exo-compact cuts (sessions) | Native cuts (sessions) |
+|---|---:|---:|
+| 200k (100k-350k `preTokens`) | 577 (100) | 151 (17) |
+| 1M (at least 500k `preTokens`) | 0 (0) | 0 (0) |
+| Other | 43 (22) | 8 (8) |
+
+No cut in this sample reached 500k `preTokens`, so there is no measured 1M post-cut result.
+
+**Cost of the cut and break-even.** The seed itself needs no model call. Four available subagent
+transcripts were tagged by the task-card refresh prompt; this is not a count of all card refreshes.
+Their total cost per fork was n=4, median 223,459
+equivalents ($1.12), IQR 107,708-421,294 ($0.54-$2.11), range 22,776-752,480 ($0.11-$3.76).
+The native transcripts contain no tagged assistant usage for the summary call (n=0), so its cost
+and the difference between the two cut costs are unknown. Although the observed 200k medians show
+lower post-cut usage for exo-compact, a turn-count break-even cannot be measured without the native
+summary cost; dividing by the unpaired post-cut medians would imply a precision this data does not
+support.
+
+**Method.** The analysis covered local transcripts from 2026-10-01 onward, including subagent
+transcripts for card-fork cost; only parent-session boundaries contribute to cut samples. A cut is
+classified by the seed marker in its injected message; its first non-synthetic assistant call is
+selected after that message by timestamp, and duplicate message IDs count once. Context is input,
+cache-write, and cache-read tokens; iteration usage is summed when present. Cost weights are input
+1, cache write 1.25, cache read 0.1, and output 5, with $5 per million equivalents. The 200k and 1M
+groups are inferred from `preTokens` bands above; remaining cuts are "other."
+
+**Caveats.** The two kinds are different sessions doing different tasks, with a different model mix;
+this is not a controlled A/B. Some cuts lack a following assistant usage record, and fewer have 5 or
+20 calls before the next cut. Window labels are inferred, and the native summary call is not priced
+in the transcripts.
+
 ## Earlier measurements
 
 - **Compaction loss audit.** 43 real compactions from day-to-day sessions were checked for facts
