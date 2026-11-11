@@ -33,6 +33,26 @@ const eventText = (e) => {
   return c.map((part) => part?.text ?? (typeof part?.content === 'string' ? part.content : '')).join('\n');
 };
 const eventTime = (e) => Date.parse(e.timestamp ?? '') || 0;
+export const timestamp = eventTime;
+export const isCompactBoundary = (e) => e?.type === 'system' && e?.subtype === 'compact_boundary';
+
+function parseTranscriptLine(line) {
+  if (line === '') return { event: undefined, malformed: false };
+  try { return { event: JSON.parse(line), malformed: false }; }
+  catch { return { event: undefined, malformed: true }; }
+}
+
+export function parseTranscript(text) {
+  const events = [];
+  let malformed = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    const parsed = parseTranscriptLine(line);
+    if (parsed.malformed) malformed++;
+    else if (parsed.event !== undefined) events.push(parsed.event);
+  }
+  return { events, malformed };
+}
+
 const isSubagentPath = (file) => file.split(path.sep).includes('subagents');
 const toolUses = (e) => (e.type === 'assistant' && Array.isArray(eventContent(e)) ? eventContent(e).filter((b) => b.type === 'tool_use') : []);
 const isRealUser = (e) => e.type === 'user' && !e.isMeta && !e.isCompactSummary && typeof eventContent(e) === 'string' && !eventContent(e).startsWith(SEED) && !eventContent(e).startsWith('<');
@@ -52,7 +72,7 @@ function named(seed, filePath) {
   return base.length >= 8 && seed.includes(base);
 }
 
-function readUsage(e) {
+export function readUsage(e) {
   const usage = e.message?.usage ?? {};
   const keys = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'];
   const iterations = Array.isArray(usage.iterations) ? usage.iterations : [];
@@ -248,9 +268,9 @@ async function analyzeTranscript(file, since, output) {
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
 
   for await (const line of rl) {
-    if (!line) continue;
-    let e;
-    try { e = JSON.parse(line); } catch { continue; }
+    const parsed = parseTranscriptLine(line);
+    if (parsed.malformed || parsed.event === undefined) continue;
+    const e = parsed.event;
     sequence++;
 
     const time = eventTime(e);
@@ -272,7 +292,7 @@ async function analyzeTranscript(file, since, output) {
         pendingCardRefreshContext = null;
       }
     }
-    if (e.type === 'system' && e.subtype === 'compact_boundary') {
+    if (isCompactBoundary(e)) {
       finalizeCut(current, output);
       current = makeCut(e, sequence, file);
       current.cardRefreshEstimates = cardRefreshSpan;

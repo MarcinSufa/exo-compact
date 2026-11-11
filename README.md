@@ -462,7 +462,8 @@ Yes. Turn it off in your home directory and on in that project, as shown under
 
 <br>
 
-Subagents keep native compaction. Scripted (`-p`) runs use exo-compact when you start them
+Subagents keep native compaction. See the [measured frequency, post-cut context and costs](docs/subagent-compaction.md).
+Scripted (`-p`) runs use exo-compact when you start them
 through the launcher. With the installed plugin they stay on native compaction.
 
 </details>
