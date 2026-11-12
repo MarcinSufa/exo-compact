@@ -18,6 +18,8 @@ export interface PreflightResult {
   ok: boolean;
   /** One plain-English line, present only when `ok` is false. */
   warning?: string;
+  /** Version read from `$.session.version()`, already supplied to the doctor child. */
+  claudeVersion?: string;
 }
 
 export const PREFLIGHT_TIMEOUT_MS = 10_000;
@@ -25,17 +27,19 @@ export const PREFLIGHT_TIMEOUT_MS = 10_000;
 const NODE_TOO_OLD_TO_CHECK = 'exo-compact: the node on PATH is too old to run its check, update Node (see README). It stays off for this session and Claude Code uses its native compaction.';
 
 export async function runPreflight(host: PreflightHost): Promise<PreflightResult> {
+  let resultVersion: string | undefined;
   try {
     const pluginRoot = await host.pluginRoot();
     if (!pluginRoot) return { ok: true };
     const claude = await host.claudeVersion();
+    resultVersion = typeof claude === 'string' && claude.length > 0 ? claude : undefined;
     const argv = ['node', `${pluginRoot}/doctor.mjs`, '--versions', ...(claude ? ['--claude', claude] : [])];
     const ran = await host.run(argv, { timeoutMs: PREFLIGHT_TIMEOUT_MS });
-    if (ran.exitCode === 0) return { ok: true };
-    if (ran.exitCode !== 1) return { ok: true };
+    if (ran.exitCode === 0) return { ok: true, ...(resultVersion ? { claudeVersion: resultVersion } : {}) };
+    if (ran.exitCode !== 1) return { ok: true, ...(resultVersion ? { claudeVersion: resultVersion } : {}) };
     const line = String(ran.stdout).trim().split('\n')[0] ?? '';
-    return { ok: false, warning: line.startsWith('exo-compact:') ? line : NODE_TOO_OLD_TO_CHECK };
+    return { ok: false, warning: line.startsWith('exo-compact:') ? line : NODE_TOO_OLD_TO_CHECK, ...(resultVersion ? { claudeVersion: resultVersion } : {}) };
   } catch {
-    return { ok: true };
+    return { ok: true, ...(resultVersion ? { claudeVersion: resultVersion } : {}) };
   }
 }

@@ -134,6 +134,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.start', async ($, input, next) => {
     const homeDir = () => resolveHomeDir({ home: () => $.env.get('HOME'), userProfile: () => $.env.get('USERPROFILE'), homeDrive: () => $.env.get('HOMEDRIVE'), homePath: () => $.env.get('HOMEPATH') });
     const secureRoot = async (root: string) => captureGuard.secure({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)) }, root, capturePath(String(await $.session.id()), root));
+    let sessionClaudeVersion: string | undefined;
     try {
       let sessionId = 'unknown';
       try { sessionId = String(await $.session.id()); } catch { /* the id is not bound yet */ }
@@ -144,6 +145,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')),
           run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)),
         });
+        sessionClaudeVersion = result.claudeVersion;
         preflight.inert = !result.ok;
         if (!result.ok && result.warning) $.ui.log(result.warning);
       }
@@ -155,13 +157,18 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot });
     } catch { /* a root that fails here is checked again before any write under it */ }
+    let sessionNotice: ReturnType<typeof noticeLog> | undefined;
+    try {
+      sessionNotice = noticeLog({ emit: (...args: [string, { to: 'debug' }?]) => $.ui.log(...args), surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD'), logFile: async () => { const noticeRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot }); return noticeRoot === null ? undefined : `${capturePath(String(await $.session.id()), noticeRoot)}/notices.log`; }, read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), now: () => $.clock.now() });
+      const versionMatch = /\d+\.\d+\.\d+/.exec(sessionClaudeVersion ?? '');
+      if (versionMatch) sessionNotice(`claude_code.version=${versionMatch[0]}`);
+    } catch { /* this step may only record the session version; it never holds up a session start */ }
     // 4.10.0 (CONTRACT S5x): once per process, in an attended session of a plugin that is not inert, set Claude Code's
     // auto-compact window and turn auto-compact on; the lines say what changed and show in quiet mode (host/notices.ts).
     try {
       const attended = () => attendedSession({ surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD') });
       if (!autoCompactChecked && !preflight.inert && await attended()) {
         autoCompactChecked = true;
-        const notice = noticeLog({ emit: (...args: [string, { to: 'debug' }?]) => $.ui.log(...args), surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD'), logFile: async () => { const noticeRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot }); return noticeRoot === null ? undefined : `${capturePath(String(await $.session.id()), noticeRoot)}/notices.log`; }, read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), now: () => $.clock.now() });
         const lines = await runAutoCompact({
           pluginRoot: async () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')),
           run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)),
@@ -171,7 +178,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           configDir: async () => $.env.get('CLAUDE_CONFIG_DIR'),
           cwd: () => $.session.cwd(),
         });
-        for (const line of lines) notice(line);
+        for (const line of lines) sessionNotice?.(line);
       }
     } catch { /* this step may only tell the user what it changed; it never holds up a session start */ }
     return next(input);

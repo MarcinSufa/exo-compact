@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configPaths, withoutBom } from './auto-compact.mjs';
 import { findBypass, pluginDigest } from './bypass.mjs';
+import { isErrorNotice, parseNoticeLine } from './notice-parser.mjs';
 import { claudeProjectDir } from './recall/paths.mjs';
 import { jevEndpoint, jevOrigin, TYPESAFE_URL as DEFAULT_JEV_URL } from './recall/jev-endpoint.mjs';
 
@@ -30,6 +31,12 @@ export const MIN_NODE = '22.15.0';
 export const MIN_CLAUDE = '2.1.278';
 export const PROBE_TIMEOUT_MS = 10_000;
 const RECALL_FILES = ['recall/launch.mjs', 'recall/mcp-server.mjs', 'recall/build-worker.mjs', 'recall/cleanup.mjs', 'recall/embed-worker.mjs', 'recall/vectors.mjs', 'recall/jev-rerank.mjs', 'recall/jev-endpoint.mjs'];
+const HOOKS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const HOOKS_FILE_LIMIT = 50;
+const HOOKS_TAIL_LINES = 1500;
+const HOOKS_TAIL_BYTES = 1024 * 1024;
+const HOOKS_ERROR_SHARE = 0.05;
+const HOOKS_FALLBACK_REASONS = new Set(['budget', 'error', 'timeout', 'insufficient_reduction', 'refusal_guard', 'interactive_only', 'not_enabled']);
 
 const KEY_HELP = [
   'Set the key, then start again:',
@@ -409,12 +416,127 @@ async function checkVersion(plugins, pluginRoot, add) {
   else say('warn', `${loaded.text}; ${at}, and this clone cannot tell which is newer. ${then}`);
 }
 
+function readNoticeTail(file) {
+  const size = fs.statSync(file).size;
+  if (size === 0) return '';
+  const start = Math.max(0, size - HOOKS_TAIL_BYTES);
+  const buffer = Buffer.alloc(size - start);
+  const fd = fs.openSync(file, 'r');
+  let bytesRead;
+  try { bytesRead = fs.readSync(fd, buffer, 0, buffer.length, start); }
+  finally { fs.closeSync(fd); }
+  let text = buffer.subarray(0, bytesRead).toString('utf8');
+  if (start > 0) {
+    const newline = text.indexOf('\n');
+    text = newline < 0 ? '' : text.slice(newline + 1);
+  }
+  return text.split('\n').filter(Boolean).slice(-HOOKS_TAIL_LINES).join('\n');
+}
+
+function noticeFiles(deps, root, since, now) {
+  const readdir = deps.readDir ?? fs.readdirSync;
+  const stat = deps.stat ?? fs.statSync;
+  let entries;
+  try { entries = readdir(root, { withFileTypes: true }); } catch { return []; }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(root, entry.name, 'notices.log');
+    let info;
+    try { info = stat(file); } catch { continue; }
+    if (!info.isFile() || info.mtimeMs < since || info.mtimeMs > now) continue;
+    files.push({ file, mtimeMs: info.mtimeMs });
+  }
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, HOOKS_FILE_LIMIT);
+}
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+}
+
+function checkHooks(deps, add) {
+  const root = deps.captureRoot ?? (typeof deps.home === 'string' ? path.join(deps.home, '.exovault', 's4-capture') : undefined);
+  if (!root) return add('hooks', 'ok', 'hooks: no sessions yet');
+  const now = Number((deps.now ?? Date.now)());
+  const since = now - HOOKS_WINDOW_MS;
+  const files = noticeFiles(deps, root, since, now);
+  const readTail = deps.readTail ?? readNoticeTail;
+  const notices = [];
+  for (const { file } of files) {
+    let text;
+    try { text = readTail(file); } catch { continue; }
+    let fileVersion;
+    for (const line of text.split('\n')) {
+      const notice = parseNoticeLine(line);
+      if (!notice) continue;
+      const at = Date.parse(notice.at);
+      if (!Number.isFinite(at) || at > now) continue;
+      if (notice.kind === 'claude_code.version') {
+        const version = parseVersion(notice.value);
+        if (version) fileVersion = version;
+      }
+      if (at < since) continue;
+      notices.push({ ...notice, timestamp: at, file, ...(notice.kind === 'compacted' && fileVersion ? { seedVersion: fileVersion } : {}) });
+    }
+  }
+  if (notices.length === 0) return add('hooks', 'ok', 'hooks: no sessions yet');
+
+  const lastRan = new Date(Math.max(...notices.map((notice) => notice.timestamp))).toISOString().slice(0, 16).replace('T', ' ');
+  const seedCuts = notices.filter((notice) => notice.kind === 'compacted').length;
+  const seedVersions = notices
+    .filter((notice) => notice.kind === 'compacted')
+    .map((notice) => notice.seedVersion)
+    .filter(Boolean);
+  const newestSeedVersion = seedVersions.reduce((newest, version) => !newest || compareVersions(version, newest) > 0 ? version : newest, undefined);
+  const installedVersion = parseVersion(deps.installedClaudeVersion);
+  let warnVersion = false;
+  let versionText = 'Claude Code version comparison unavailable';
+  if (installedVersion && newestSeedVersion) {
+    const installed = installedVersion.join('.');
+    const newest = newestSeedVersion.join('.');
+    warnVersion = compareVersions(installedVersion, newestSeedVersion) > 0;
+    versionText = warnVersion
+      ? `Claude Code ${installed} has no seed cut yet; run one /compact and check (newest seed cut: ${newest})`
+      : `Claude Code version comparison: installed=${installed}, newest with seed cut=${newest}`;
+  }
+  const fallbacks = new Map();
+  for (const notice of notices) {
+    if (notice.kind !== 'compact.fallback' || notice.fields.origin !== 'compact') continue;
+    const reason = HOOKS_FALLBACK_REASONS.has(notice.value) ? notice.value : 'other';
+    fallbacks.set(reason, (fallbacks.get(reason) ?? 0) + 1);
+  }
+  const fallbackCount = [...fallbacks.values()].reduce((sum, count) => sum + count, 0);
+  const fallbackText = [...fallbacks.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none';
+  const errors = new Map();
+  for (const notice of notices) {
+    if (!isErrorNotice(notice)) continue;
+    errors.set(notice.kind, (errors.get(notice.kind) ?? 0) + 1);
+  }
+  const errorCount = [...errors.values()].reduce((sum, count) => sum + count, 0);
+  const errorPercent = notices.length ? Number((errorCount / notices.length * 100).toFixed(1)) : 0;
+  const errorText = [...errors.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([kind, count]) => `${kind}=${count}`).join(', ') || 'none';
+  const warnEveryCutFellBack = fallbackCount > 0 && seedCuts === 0;
+  const warnErrorShare = errorCount / notices.length > HOOKS_ERROR_SHARE;
+  const status = warnEveryCutFellBack || warnErrorShare || warnVersion ? 'warn' : 'ok';
+  add('hooks', status, [
+    `hooks: last ran ${lastRan} UTC`,
+    `seed cuts=${seedCuts}${seedCuts === 0 ? ' (no cuts in window)' : ''}`,
+    `native fallbacks=${fallbackCount} (${fallbackText})`,
+    `error notices=${errorCount}/${notices.length} (${errorPercent}%, warn above 5%; by kind: ${errorText})`,
+    versionText,
+  ].join('; '));
+}
+
 export async function runDoctor(deps) {
   const checks = [];
   const add = (id, status, message) => checks.push({ id, status, message });
 
   checkNode(deps.nodeVersion, add);
-  checkClaude(await deps.claudeVersion(), add);
+  const claudeText = await deps.claudeVersion();
+  checkClaude(claudeText, add);
 
   const missing = RECALL_FILES.filter((file) => !deps.fileExists(path.join(deps.pluginRoot, file)));
   if (missing.length === 0) add('recall', 'ok', 'recall files present');
@@ -438,6 +560,8 @@ export async function runDoctor(deps) {
     checkAutoCompact(deps, add);
     checkBypass(deps, add);
   }
+
+  checkHooks({ ...deps, installedClaudeVersion: claudeText }, add);
 
   let jev = 'off';
   // 4.7.5: without --jev, a Jev option that is on in the settings is checked the same way, as a warning only.
@@ -587,9 +711,10 @@ async function main(argv) {
     jevOptions: jevOptionsOn(readSettings(process.env)),
     jevModel: modelAt >= 0 ? argv[modelAt + 1] : undefined,
     pluginRoot,
+    home: os.homedir(),
     // --preflight (the installers): no folder is turned on yet, so the checks about a session in the cwd and about the
     // installed copy are left out.
-    ...(argv.includes('--preflight') ? {} : { cwd: process.cwd(), home: os.homedir(), readFile: (file) => fs.readFileSync(file, 'utf8'), plugins: pluginRecords(process.env, pluginRoot), bypass: () => findBypass(claudeProjectDir(process.cwd(), process.env, os.homedir())) }),
+    ...(argv.includes('--preflight') ? {} : { cwd: process.cwd(), readFile: (file) => fs.readFileSync(file, 'utf8'), plugins: pluginRecords(process.env, pluginRoot), bypass: () => findBypass(claudeProjectDir(process.cwd(), process.env, os.homedir())) }),
   });
   process.stdout.write(`${argv.includes('--json') ? JSON.stringify(result) : formatReport(result)}\n`);
   return exitCode(result);

@@ -427,12 +427,29 @@ carries on with the same task.
 </details>
 
 <details>
-<summary><b>What happens if it breaks?</b></summary>
+<summary><b>When exo-compact falls back</b></summary>
 
 <br>
 
-The session falls back to native compaction. That also happens by design when a rebuilt context
-cannot fit. You are never left without a compaction.
+Claude Code uses its normal compaction and the session continues. In a terminal, exo-compact shows
+a dim notice with the reason. The VS Code and Cursor extensions may not draw notices; `tools/status.mjs`
+shows the reason there.
+
+- `insufficient_reduction`: the seed and kept messages were not at least 25% smaller. This is expected
+  in short sessions.
+- `refusal_guard`: a refusal after an earlier seed keeps exo-compact off for the rest of that session.
+- `interactive_only`: expected in `-p` and SDK runs while `interactiveOnly` is on. Set it to `false`
+  if those runs should use exo-compact.
+- `budget`, `timeout`, or `error`: the seed ran out of budget, timed out, or failed. One fallback is
+  safe. If these repeat, run [the doctor's hook check](docs/install.md#check-that-it-works) and follow
+  the [Claude Code upgrade checklist](docs/claude-code-upgrades.md).
+
+The hook check reads up to 50 recent notice files from the last seven days. It warns if every cut
+fell back, if error notices exceed 5% of notices, or if the installed Claude Code version is newer
+than the newest version with a seed cut in that window. In attended sessions using the default quiet
+notice policy, SessionStart records `claude_code.version=<x.y.z>` in the session notice log. The
+version comparison stays unavailable until a successful `/compact` establishes a version-tagged
+baseline.
 
 </details>
 

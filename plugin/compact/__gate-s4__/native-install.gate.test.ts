@@ -165,7 +165,7 @@ describe('SessionStart preflight', () => {
       pluginRoot: async () => '/plugin',
       run: async (argv) => { calls.push([...argv]); return { exitCode: 1, stdout: 'exo-compact: Node 20.1.0 is too old\n' }; },
     });
-    expect(result).toEqual({ ok: false, warning: 'exo-compact: Node 20.1.0 is too old' });
+    expect(result).toEqual({ ok: false, warning: 'exo-compact: Node 20.1.0 is too old', claudeVersion: '2.1.280-dev' });
     expect(calls).toEqual([['node', '/plugin/doctor.mjs', '--versions', '--claude', '2.1.280-dev']]);
   });
 
@@ -174,6 +174,17 @@ describe('SessionStart preflight', () => {
     expect((await runPreflight({ ...base, run: async () => ({ exitCode: 0, stdout: '' }) })).ok).toBe(true);
     expect((await runPreflight({ ...base, run: async () => { throw new Error('spawn node ENOENT'); } })).ok).toBe(true);
     expect((await runPreflight({ ...base, pluginRoot: async () => undefined, run: async () => ({ exitCode: 1, stdout: 'x' }) })).ok).toBe(true);
+  });
+
+  it('[M21-failed-check-drops-known-version] retains the session version when the doctor child cannot run', async () => {
+    let spawns = 0;
+    const result = await runPreflight({
+      claudeVersion: async () => '2.1.292',
+      pluginRoot: async () => '/plugin',
+      run: async () => { spawns += 1; throw new Error('spawn node ENOENT'); },
+    });
+    expect(result).toEqual({ ok: true, claudeVersion: '2.1.292' });
+    expect(spawns).toBe(1);
   });
 
   it('with an old Node the register hooks warn once per session and capture nothing', async () => {
@@ -209,6 +220,75 @@ describe('SessionStart preflight', () => {
     expect(logs.filter((line) => line.includes('too old'))).toHaveLength(1);
     expect(runs).toHaveLength(1);
     expect(writes).toEqual([]);
+  });
+
+  it('[M20-session-version-not-recorded] logs the already-read version once per session without a Claude spawn', async () => {
+    const { register } = await import('../compact.js');
+    const on: Record<string, Handler> = {};
+    register(((name: string, fn: Handler) => { on[name] = fn; return { catch: (caught: unknown) => { (on as Record<string, unknown>)[name + '.catch'] = caught; } }; }) as never, { autoCompact: false } as never);
+    const stored = new Map<string, string>();
+    const runs: string[][] = [];
+    let versionReads = 0;
+    const $ = {
+      session: {
+        cwd: async () => '/home/u/work/repo',
+        id: async () => 's-version',
+        surfaces: async () => ['terminal'],
+        version: async () => { versionReads += 1; return { version: '2.1.292', base: '2.1.292' }; },
+      },
+      fs: {
+        exists: async () => false,
+        read: async (file: string) => { if (stored.has(file)) return stored.get(file)!; throw new Error('ENOENT'); },
+        write: async (file: string, text: string) => { stored.set(file, text); },
+        list: async () => [],
+      },
+      ui: { log: () => undefined },
+      plugin: { name: 'exo-compact', root: '/plugin' },
+      env: { get: (name: string) => ({ HOME: '/home/u' } as Record<string, string>)[name] },
+      process: { run: async (argv: string[]) => { runs.push([...argv]); return { exitCode: 0, stdout: '', stderr: '' }; } },
+      clock: { sleep: (ms: number) => (ms === 0 ? Promise.resolve() : new Promise(() => undefined)), now: () => Date.parse('2026-11-12T12:00:00.000Z') },
+    };
+    const fire = () => on['session.start']($, { cwd: '/home/u/work/repo', surface: 'terminal', isInteractive: true }, async () => ({ cwd: '/home/u/work/repo' }));
+    await fire();
+    await fire();
+    const notices = [...stored.entries()].find(([file]) => file.endsWith('/notices.log'))?.[1] ?? '';
+    expect(notices.match(/claude_code\.version=2\.1\.292/g)).toHaveLength(1);
+    expect(versionReads).toBe(1);
+    expect(runs.filter((argv) => argv[1]?.endsWith('/doctor.mjs') && argv.includes('--versions'))).toHaveLength(1);
+    expect(runs.some((argv) => argv[0] === 'claude' || argv.includes('--version'))).toBe(false);
+  });
+
+  it('[M23-version-notice-can-block-session-start] a throwing ui.log in notices all still calls next(input)', async () => {
+    const { register } = await import('../compact.js');
+    const on: Record<string, Handler> = {};
+    register(((name: string, fn: Handler) => { on[name] = fn; return { catch: (caught: unknown) => { (on as Record<string, unknown>)[name + '.catch'] = caught; } }; }) as never, { autoCompact: false, notices: 'all' } as never);
+    const input = { cwd: '/home/u/work/repo', surface: 'terminal', isInteractive: true };
+    const $ = {
+      session: {
+        cwd: async () => '/home/u/work/repo',
+        id: async () => 's-version-log-throws',
+        surfaces: async () => ['terminal'],
+        version: async () => ({ version: '2.1.292', base: '2.1.292' }),
+      },
+      fs: {
+        exists: async () => false,
+        read: async () => { throw new Error('ENOENT'); },
+        write: async () => undefined,
+        list: async () => [],
+      },
+      ui: { log: () => { throw new Error('host log failed'); } },
+      plugin: { name: 'exo-compact', root: '/plugin' },
+      env: { get: (name: string) => ({ HOME: '/home/u' } as Record<string, string>)[name] },
+      process: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
+      clock: { sleep: (ms: number) => (ms === 0 ? Promise.resolve() : new Promise(() => undefined)), now: () => Date.parse('2026-11-12T12:00:00.000Z') },
+    };
+    let nextCalls = 0;
+    let nextInput: unknown;
+    const next = async (...args: unknown[]) => { nextCalls += 1; nextInput = args[0]; return { started: true }; };
+    const result = await on['session.start']($, input, next as never);
+    expect(result).toEqual({ started: true });
+    expect(nextCalls).toBe(1);
+    expect(nextInput).toBe(input);
   });
 
   it('with a good Node the same hooks capture with no flag file at all', async () => {

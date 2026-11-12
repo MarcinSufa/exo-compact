@@ -9,6 +9,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { claudeProjectsDir, homeDir } from '../plugin/compact/recall/paths.mjs';
+import { parseFallbackNotices } from '../plugin/compact/notice-parser.mjs';
 
 export const SEED_SENTINEL = '[[exovault:s4-seed:v1]]';
 const NATIVE_PREFIX = 'This session is being continued';
@@ -86,9 +87,6 @@ function captureDirs(sessionId, cwd, home, platform) {
   return [...candidates.values()].filter((dir) => fs.existsSync(dir));
 }
 
-const FALLBACK_LINE = /^(\S+) compact\.fallback=(\S+) origin=compact\b(?:.*\bsizeAfter=(\d+))?/;
-const SIZE_BEFORE_LINE = /^\S+ compact\.sizeBefore=(\d+)/;
-
 // 4.7.4: the `compact.fallback=<reason> origin=compact` lines the quiet notice policy records, across every capture dir,
 // ordered by stamp (ISO strings, so string order is time order).
 function fallbackLines(dirs) {
@@ -96,17 +94,8 @@ function fallbackLines(dirs) {
   for (const dir of dirs) {
     const file = path.join(dir, 'notices.log');
     if (!fs.existsSync(file)) continue;
-    // 4.8.0: the message tokens S4 counted (the last compact.sizeBefore before the fallback) and, from 4.8.0 lines,
-    // what its seed and tail would have left, so a too-short session shows why it fell back.
-    let sizeBefore;
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      const size = SIZE_BEFORE_LINE.exec(line);
-      if (size) sizeBefore = Number(size[1]);
-      const match = FALLBACK_LINE.exec(line);
-      if (!match) continue;
-      lines.push({ at: match[1], reason: match[2], ...(sizeBefore !== undefined ? { sizeBefore } : {}), ...(match[3] ? { sizeAfter: Number(match[3]) } : {}) });
-      sizeBefore = undefined;
-    }
+    // The shared parser keeps status and doctor aligned on timestamp and fallback field handling.
+    lines.push(...parseFallbackNotices(fs.readFileSync(file, 'utf8')));
   }
   return lines.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
