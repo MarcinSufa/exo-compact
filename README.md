@@ -432,8 +432,8 @@ carries on with the same task.
 <br>
 
 Claude Code uses its normal compaction and the session continues. In a terminal, exo-compact shows
-a dim notice with the reason. The VS Code and Cursor extensions may not draw notices; `tools/status.mjs`
-shows the reason there.
+a dim notice with the reason. Starting with Claude Code extension 2.1.312, the VS Code and Cursor extensions
+draw these notices in chat; older extension versions may not. `tools/status.mjs` shows the reason in that case.
 
 - `insufficient_reduction`: the seed and kept messages were not at least 25% smaller. This is expected
   in short sessions.

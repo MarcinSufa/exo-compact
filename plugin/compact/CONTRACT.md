@@ -3111,8 +3111,9 @@ and log call of `compact.ts` and `core/*.ts`.
 
 Evidence: a session started from the VS Code / Cursor extension (Claude Code 2.1.296, `CLAUDE_CODE_ENTRYPOINT=claude-vscode`)
 reports `$.session.surfaces()` as `[]` in every hook, so with `interactiveOnly: true` it compacted natively twice with no
-notice, wrote no capture segment and no `notices.log`, and `tools/status.mjs` hid it. The extension draws nothing for a
-`ui_log` line.
+notice, wrote no capture segment and no `notices.log`, and `tools/status.mjs` hid it. The extension drew nothing for a
+`ui_log` line in 2.1.296. From 2.1.312, the extension bundle handles `ui_log` and adds it to the chat as a row (read
+from the bundle code, issue #25).
 
 **Attended.** `host/notices.ts` exports `attendedSession(signals)`: attended when `surfaces()` is non-empty, or when
 `CLAUDE_CODE_ENTRYPOINT` is `claude-vscode` and neither `CLAUDE_CODE_CHILD_SESSION` (set by the Bash tool for its children)
