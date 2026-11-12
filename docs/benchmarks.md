@@ -1,5 +1,7 @@
 # Benchmarks
 
+For how to run the task A/B harness and read its metrics, see [A/B harness](ab-harness.md).
+
 ## A/B with the 4.8.0 defaults
 
 **Workload.** One long Claude Code session works through a chain of 8 real, consecutive coding

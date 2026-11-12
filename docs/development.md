@@ -33,6 +33,7 @@ npm run typecheck:full  # against Claude Code's own declarations, when you have 
   `npm test` in it.
 - **Offline replay.** `tools/hook-replay/replay.mjs` runs the real hook offline on recorded
   sessions. It costs nothing, so use it for any change to how seeds are built before a live test.
+- **A/B harness.** [Run paired task arms and read the metrics](ab-harness.md). The public tree does not include the private task data used for the published results.
 - **Changes.** [CHANGELOG.md](../CHANGELOG.md) lists what changed in each version.
 
 Issues and pull requests are welcome. Please include `node ~/.exo-compact/plugin/compact/setup.cjs doctor --json`
