@@ -49,3 +49,40 @@ test('matches only an exact rare five-token n-gram', () => {
   assert.equal(hasExactNgram('The archived detail says amber falcon studies violet mechanisms.', grams), false);
   assert.equal(hasExactNgram('The archived detail says quartz kestrel study violet mechanisms.', grams), false);
 });
+
+test('excludes a five-token n-gram repeated in two seed sections', () => {
+  const sections = [
+    { name: 'Working notes', label: 'disk_candidate', body: 'quartz kestrel studies violet mechanisms' },
+    { name: 'Recipes', label: 'disk_candidate', body: 'quartz kestrel studies violet mechanisms' },
+  ];
+
+  assert.equal(buildDiskCandidateNgrams(sections).size, 0);
+});
+
+test('excludes a five-token n-gram found in retained tail text', () => {
+  const sections = [
+    { name: 'Working notes', label: 'disk_candidate', body: 'quartz kestrel studies violet mechanisms' },
+  ];
+  const excludedTexts = ['The retained tail says quartz kestrel studies violet mechanisms'];
+
+  assert.equal(buildDiskCandidateNgrams(sections, { excludedTexts }).size, 0);
+});
+
+test('matches five-token n-grams with case-sensitive words', () => {
+  const sections = [
+    { name: 'Working notes', label: 'disk_candidate', body: 'quartz kestrel studies violet mechanisms' },
+  ];
+  const grams = buildDiskCandidateNgrams(sections);
+
+  assert.equal(hasExactNgram('QUARTZ KESTREL STUDIES VIOLET MECHANISMS', grams), false);
+});
+
+test('normalizes newlines and repeated spaces when matching five-token n-grams', () => {
+  const sections = [
+    { name: 'Working notes', label: 'disk_candidate', body: 'quartz kestrel studies violet mechanisms' },
+  ];
+  const grams = buildDiskCandidateNgrams(sections);
+
+  assert.equal(hasExactNgram('quartz kestrel\nstudies violet mechanisms', grams), true);
+  assert.equal(hasExactNgram('quartz  kestrel studies violet mechanisms', grams), true);
+});
