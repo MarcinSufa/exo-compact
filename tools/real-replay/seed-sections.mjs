@@ -155,17 +155,24 @@ function boundaryWindows(events) {
   return splitBoundaries(events);
 }
 
-function findPluginSeed(events, start, stop) {
+export function findInjectedCut(events, start, stop) {
   const firstUser = events.slice(start + 1, Math.min(stop, start + 6)).find((event) => event.type === 'user');
   if (!firstUser) return undefined;
   const injectionTime = timestamp(firstUser);
   const injectedUsers = events.slice(start + 1, stop).filter((event) => event.type === 'user' && timestamp(event) <= injectionTime + 2000);
   const seedEvent = injectedUsers.find((event) => seedTextFromEvent(event).includes(SEED_SENTINEL));
-  if (!seedEvent) return undefined;
-  return { seedEvent, seedText: seedTextFromEvent(seedEvent), injectionTime, injectedUsers };
+  if (seedEvent) return { arm: 'plugin', seedEvent, seedText: seedTextFromEvent(seedEvent), injectionTime, injectedUsers };
+  const nativeSummary = injectedUsers.find(isSummaryEvent);
+  if (!nativeSummary) return undefined;
+  return { arm: 'native', seedEvent: nativeSummary, seedText: seedTextFromEvent(nativeSummary), injectionTime, injectedUsers };
 }
 
-function tailContext(events, seedEvent, stop, injectionTime) {
+function findPluginSeed(events, start, stop) {
+  const cut = findInjectedCut(events, start, stop);
+  return cut?.arm === 'plugin' ? cut : undefined;
+}
+
+export function tailContext(events, seedEvent, stop, injectionTime) {
   const seedIndex = events.indexOf(seedEvent);
   const messages = [];
   for (let index = seedIndex + 1; index < stop; index++) {
@@ -185,7 +192,7 @@ function tailContext(events, seedEvent, stop, injectionTime) {
   return { messages, tokens, material };
 }
 
-function assistantCalls(events, start, stop, injectionTime) {
+export function assistantCalls(events, start, stop, injectionTime) {
   const calls = [];
   const byId = new Map();
   for (let index = start + 1; index < stop; index++) {
@@ -194,18 +201,25 @@ function assistantCalls(events, start, stop, injectionTime) {
     const id = String(event.message?.id ?? event.uuid ?? `event-${index}`);
     let call = byId.get(id);
     if (!call) {
-      call = { id, tools: [], material: '' };
+      call = { id, tools: [], material: '', parts: [] };
       byId.set(id, call);
       calls.push(call);
     }
     const content = event.message?.content;
-    if (typeof content === 'string') call.material += `${content}\n`;
+    if (typeof content === 'string') {
+      call.material += `${content}\n`;
+      call.parts.push({ index, material: content });
+    }
     else if (Array.isArray(content)) {
       for (const block of content) {
-        if (block?.type === 'text' && typeof block.text === 'string') call.material += `${block.text}\n`;
+        if (block?.type === 'text' && typeof block.text === 'string') {
+          call.material += `${block.text}\n`;
+          call.parts.push({ index, material: block.text });
+        }
         if (block?.type === 'tool_use') {
           call.tools.push(block);
           call.material += `${JSON.stringify(block.input ?? {})}\n`;
+          call.parts.push({ index, material: JSON.stringify(block.input ?? {}) });
         }
       }
     }
