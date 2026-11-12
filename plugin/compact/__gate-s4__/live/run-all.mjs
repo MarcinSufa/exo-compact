@@ -4,6 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { bigFixtureFiles, estimateTokens, fixtureCharCount, PROBE_FIXTURES, printDryCommand } from './lib.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const CLAUDE_BIN = ['', 'home', 'agent', '.cursor-server', 'extensions', 'anthropic.claude-code-2.1.312-linux-x64', 'resources', 'native-binary', 'claude'].join('/');
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log('Usage: node plugin/compact/__gate-s4__/live/run-all.mjs [--dry]');
+  console.log('The live probes can start Claude and use model requests. Use --dry to print commands only.');
+  console.log(`Set S4_GATE_CLAUDE_BIN=${CLAUDE_BIN} before a live run.`);
+  process.exit(0);
+}
+
 // Round 8 finding 13: pricing each probe as `fixture chars / 4` (one call's worth) left out the
 // base request (system prompt plus tool schema, about 20-25k tokens per the review, present on
 // EVERY request, not just one) and the fact that each fixture file read is its own tool-use
@@ -27,13 +36,28 @@ const probes = [
   ['G9', 'g9-extension-session.mjs', { prompt: 'Extension: read a.txt..e.txt, compare, one short sentence, then /compact. Nested and plain: reply ok, then /compact.', options: { interactiveOnly: true }, calls: 3, requests: 11, stream: true, note: 'ext-fallback: one stream-json process per arm. Extension is 5 file reads plus the answer plus /compact (7). Nested and plain stay two short turns (2 + 2).' }],
   ['G10', 'g10-session-root.mjs', { prompt: 'Extension: read a.txt..e.txt, compare, one short sentence; Bash cd to an outside directory and pwd; then /compact.', options: { interactiveOnly: true }, calls: 1, requests: 9, stream: true, note: 'session-root: one stream-json extension session. Five file reads plus the answer (6), one Bash plus the one-word reply (2), then /compact (1).' }],
   ['G11', 'g11-session-push-server.mjs', { prompt: 'Stream: read a.txt..c.txt plus a note with a rare id; /compact; ok; ask about the id without tools.', options: {}, calls: 1, requests: 7, stream: true, note: 'session push via the recall server (S5s): one stream-json session with the recall server handed in through the strict MCP config. Three file reads plus the answer (4), /compact (1), a one-word turn while the index builds (1), question (1).' }],
+  ['G12', 'g12-extension-compact.mjs', { prompt: 'Intercept one prompt.submit turn, call $.session.compact() immediately and after the turn.', calls: 2, requests: 3, stream: true, includeExoCompact: false, extraPluginDirs: ['<fresh-G12-project>/g12-probe-plugin'], arms: [{ name: 'extension', printMode: false }, { name: 'print-control', printMode: true }], note: `two stream-json processes using only the temporary probe plugin; estimate allows one prompt model request per arm if { text: "probe" } does not answer the turn by itself, plus one possible core summary request if deferred extension compaction reaches core on its short history. If the hook result short-circuits as intended, actual requests may be one. Set S4_GATE_CLAUDE_BIN=${CLAUDE_BIN}.` }],
 ];
 
 if (process.argv.includes('--dry')) {
   let totalCalls = 0;
   let totalTokens = 0;
   for (const [id, , spec] of probes) {
-    printDryCommand({ prompt: spec.prompt, cwd: `<fresh-${id}-project>`, debugFile: `<fresh-${id}-project>/debug.log`, settingsFile: `<fresh-${id}-project>/settings.json`, extraArgs: [], stream: Boolean(spec.stream) });
+    const arms = spec.arms ?? [{ printMode: true }];
+    for (const arm of arms) {
+      printDryCommand({
+        prompt: spec.prompt,
+        cwd: `<fresh-${id}-project>`,
+        debugFile: `<fresh-${id}-project>/debug.log`,
+        settingsFile: `<fresh-${id}-project>/settings.json`,
+        extraArgs: [],
+        stream: Boolean(spec.stream),
+        printMode: arm.printMode,
+        includeExoCompact: spec.includeExoCompact ?? true,
+        extraPluginDirs: spec.extraPluginDirs ?? [],
+      });
+      if (spec.arms) console.log(`[${id}:${arm.name}] DRY: command constructed; Claude was not started`);
+    }
     const fixture = PROBE_FIXTURES[id];
     const fixtureChars = fixture ? fixtureCharCount(bigFixtureFiles(fixture.names, fixture.repeat, fixture.extra)) : 0;
     const fixtureTokens = estimateTokens(fixtureChars);
@@ -46,6 +70,7 @@ if (process.argv.includes('--dry')) {
   }
   console.log(`[dry] TOTAL planned claude invocations=${totalCalls}, estimated total input tokens~=${totalTokens}`);
   console.log('[dry] Estimate includes a per-request base (system prompt + tools, ~22.5k tokens) and one request per fixture-file read, not just one request per invocation, per round 8 finding 13. Still excludes the model\'s own output tokens and any cache-miss pricing difference. Priced for whatever S4_GATE_MODEL is set to (default haiku).');
+  console.log(`[dry] Set S4_GATE_CLAUDE_BIN=${CLAUDE_BIN} before a live run.`);
 } else {
   let failed = false;
   for (const [id, file] of probes) {

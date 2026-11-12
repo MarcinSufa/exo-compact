@@ -33,11 +33,11 @@ export function isDry() { return process.argv.includes('--dry'); }
  * a probe explicitly asks for it (`includeTriggerPlugin: true`) as a negative control, e.g. G6's
  * "both plugins still load cleanly" check.
  */
-export function buildClaudeCommand({ prompt, cwd, debugFile, settingsFile, extraArgs = [], stream = false, includeTriggerPlugin = false }) {
-  const pluginArgs = includeTriggerPlugin ? ['--plugin-dir', PLUGIN_DIR, '--plugin-dir', TRIGGER_PLUGIN_DIR] : ['--plugin-dir', PLUGIN_DIR];
+export function buildClaudeCommand({ prompt, cwd, debugFile, settingsFile, extraArgs = [], stream = false, streamArgs = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], includeTriggerPlugin = false, printMode = true, includeExoCompact = true, extraPluginDirs = [] }) {
+  const pluginArgs = [...(includeExoCompact ? (includeTriggerPlugin ? [PLUGIN_DIR, TRIGGER_PLUGIN_DIR] : [PLUGIN_DIR]) : []), ...extraPluginDirs].flatMap((dir) => ['--plugin-dir', dir]);
   const base = ['--model', process.env.S4_GATE_MODEL || 'haiku', ...pluginArgs, '--debug-file', debugFile, '--strict-mcp-config', '--mcp-config', path.join(cwd, 'empty-mcp.json'), '--setting-sources', 'project', '--settings', settingsFile];
   const args = stream
-    ? ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', ...base, ...extraArgs]
+    ? [...(printMode ? ['-p'] : []), ...streamArgs, ...base, ...extraArgs]
     : ['-p', prompt, '--output-format', 'json', ...base, ...extraArgs];
   return { command: process.env.S4_GATE_CLAUDE_BIN || 'claude', args, cwd };
 }
@@ -92,7 +92,7 @@ export async function withSettingsFile(options, run, extras = {}) {
  * `envOverrides` may pass `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: undefined` to delete it again (G5's
  * positive control needs a run with it unset).
  */
-function buildChildEnv(envOverrides) {
+function buildChildEnv(envOverrides, removeEnvKeys = []) {
   const env = { ...process.env };
   const stripExact = new Set(['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT']);
   const keepPrefixed = new Set(['CLAUDE_CODE_ENABLE_FUNCTION_HOOKS']);
@@ -101,7 +101,7 @@ function buildChildEnv(envOverrides) {
     if (key.startsWith('CLAUDE_CODE_') && !keepPrefixed.has(key)) delete env[key];
   }
   env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = '1';
-  for (const [key, value] of Object.entries(envOverrides)) {
+  for (const [key, value] of Object.entries({ ...envOverrides, ...Object.fromEntries(removeEnvKeys.map((key) => [key, undefined])) })) {
     if (value === undefined) delete env[key];
     else env[key] = String(value);
   }
@@ -242,8 +242,9 @@ export async function sendCompact({ sessionId, projectDir, options = {}, envOver
  */
 // `mcpServers` goes into the one config --strict-mcp-config allows: G11 needs the plugin's own recall server, which
 // strict mode leaves out.
-export async function runClaudeStream({ turns, options = {}, settings = {}, setup = true, timeoutMs = 120000, files = {}, envOverrides = {}, extraArgs = [], includeTriggerPlugin = false, initialize = false, onEvent, mcpServers = {} }) {
-  const cwd = await mkdtemp(path.join(tmpdir(), 's4-gate-project-'));
+export async function runClaudeStream({ turns, options = {}, settings = {}, setup = true, timeoutMs = 120000, files = {}, projectDir, envOverrides = {}, removeEnvKeys = [], extraArgs = [], streamArgs, includeTriggerPlugin = false, initialize = false, onEvent, mcpServers = {}, printMode = true, includeExoCompact = true, extraPluginDirs = [], prepareProject, keepStdinOpenUntil }) {
+  const ownsProject = !projectDir;
+  const cwd = projectDir ?? await mkdtemp(path.join(tmpdir(), 's4-gate-project-'));
   const debugFile = path.join(cwd, 'debug.log');
   if (keepEnabled()) console.log(`[S4_GATE_KEEP] project=${cwd} debug=${debugFile}`);
   await writeFile(path.join(cwd, 'empty-mcp.json'), JSON.stringify({ mcpServers }));
@@ -256,24 +257,43 @@ export async function runClaudeStream({ turns, options = {}, settings = {}, setu
   await mkdir(path.join(cwd, '.claude'), { recursive: true });
   const setupResult = spawnSync('node', [SETUP_CJS, setup ? 'enable' : 'disable', cwd], { encoding: 'utf8' });
   if (setupResult.status !== 0) throw new Error(`setup.cjs ${setup ? 'enable' : 'disable'} failed: ${setupResult.stderr || setupResult.error || setupResult.status}`);
+  const preparedProject = prepareProject ? await prepareProject({ cwd }) : {};
   const settingsFile = path.join(cwd, 'settings.json');
-  await writeFile(settingsFile, JSON.stringify({ ...settings, pluginConfigs: pluginConfigsFor(options) }, null, 2));
-  const command = buildClaudeCommand({ cwd, debugFile, settingsFile, extraArgs, stream: true, includeTriggerPlugin });
-  const disposeProject = () => keepEnabled() ? Promise.resolve() : rm(cwd, { recursive: true, force: true });
+  await writeFile(settingsFile, JSON.stringify({ ...settings, ...(preparedProject?.settings ?? {}), pluginConfigs: includeExoCompact ? pluginConfigsFor(options) : {} }, null, 2));
+  const command = buildClaudeCommand({ cwd, debugFile, settingsFile, extraArgs, stream: true, streamArgs, includeTriggerPlugin, printMode, includeExoCompact, extraPluginDirs: [...extraPluginDirs, ...(preparedProject?.extraPluginDirs ?? [])] });
+  const disposeProject = () => ownsProject && !keepEnabled() ? rm(cwd, { recursive: true, force: true }) : Promise.resolve();
   if (isDry()) {
-    printDryCommand({ cwd, debugFile, settingsFile, extraArgs, stream: true, includeTriggerPlugin });
+    printDryCommand({ cwd, debugFile, settingsFile, extraArgs, stream: true, streamArgs, includeTriggerPlugin, printMode, includeExoCompact, extraPluginDirs: [...extraPluginDirs, ...(preparedProject?.extraPluginDirs ?? [])] });
     return { code: 0, results: [], cwd, debugLog: '', command, dispose: disposeProject };
   }
   const results = await new Promise((resolve, reject) => {
-    const child = spawn(command.command, command.args, { cwd, env: buildChildEnv(envOverrides), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command.command, command.args, { cwd, env: buildChildEnv(envOverrides, removeEnvKeys), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdoutBuf = '';
     const collected = [];
     const timer = setTimeout(() => { child.kill(); reject(new Error(`claude (stream) timed out after ${timeoutMs}ms`)); }, timeoutMs);
     let turnIndex = 0;
     let turnsOpen = !initialize;
+    let childClosed = false;
+    let waitingToCloseStdin = false;
+    const finishAfterPredicate = async () => {
+      const deadline = Date.now() + Math.max(0, keepStdinOpenUntil.timeoutMs);
+      const intervalMs = Math.max(10, keepStdinOpenUntil.intervalMs ?? 100);
+      while (!childClosed && Date.now() <= deadline) {
+        try { if (await keepStdinOpenUntil.predicate(cwd)) break; } catch {}
+        if (childClosed || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, deadline - Date.now())));
+      }
+      if (!childClosed && !child.stdin.destroyed) child.stdin.end();
+    };
     const sendNextTurn = () => {
       if (!turnsOpen) return;
-      if (turnIndex >= turns.length) { child.stdin.end(); return; }
+      if (turnIndex >= turns.length) {
+        if (keepStdinOpenUntil && !waitingToCloseStdin) {
+          waitingToCloseStdin = true;
+          void finishAfterPredicate();
+        } else if (!keepStdinOpenUntil && !child.stdin.destroyed) child.stdin.end();
+        return;
+      }
       const text = turns[turnIndex];
       turnIndex += 1;
       child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`);
@@ -303,8 +323,8 @@ export async function runClaudeStream({ turns, options = {}, settings = {}, setu
       }
     });
     child.stderr.on('data', () => {});
-    child.on('error', (error) => { clearTimeout(timer); reject(error); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, results: collected }); });
+    child.on('error', (error) => { childClosed = true; clearTimeout(timer); reject(error); });
+    child.on('close', (code) => { childClosed = true; clearTimeout(timer); resolve({ code, results: collected }); });
     if (initialize) child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: 'init-1', request: { subtype: 'initialize' } })}\n`);
     else sendNextTurn();
   });
@@ -718,4 +738,17 @@ export function report(checkId, checks, meta = {}) {
   console.log(`[${checkId}] ${allPassed ? 'PASS' : 'FAIL'} overall${version ? ` cc_version=${version}` : ''}`);
   if (!allPassed) process.exitCode = 1;
   return allPassed;
+}
+
+export function classifyCompactOutcome(record) {
+  if (!record || typeof record !== 'object') return 'other';
+  const message = typeof record.message === 'string' ? record.message : '';
+  if (message.includes('not available in a headless (-p / SDK) session yet')) return 'refused-headless';
+  if (message.includes('a turn is running') || message.includes('this hook is holding')) return 'in-turn';
+  if (record.status === 'resolved') return 'ok';
+  return 'other';
+}
+
+export function isCompactBoundary(event) {
+  return event?.type === 'system' && event?.subtype === 'compact_boundary';
 }
