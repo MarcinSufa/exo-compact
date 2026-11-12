@@ -52,7 +52,7 @@ const POLISH_CUE_LINES: Record<string, Array<[number, number]>> = {
   'plugin/compact/core/labels.ts': [[51, 51], [55, 55]],
   'plugin/compact/core/state-updates.ts': [[33, 33], [37, 37], [39, 39]],
   'plugin/compact/recall/rank.mjs': [[20, 21]],
-  'tools/real-replay/real-replay.mjs': [[378, 378]],
+  'tools/real-replay/real-replay.mjs': [[349, 349]],
 };
 
 /**

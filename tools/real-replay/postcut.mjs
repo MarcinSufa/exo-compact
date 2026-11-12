@@ -10,12 +10,10 @@
 // is active time (gaps capped at 120 s) and only counts cuts with no user message before that edit.
 import fs from 'node:fs';
 import path from 'node:path';
+import { eventContentText, isSearch, parseJsonl, readPaths, toolUses } from './transcript-parser.mjs';
 
 const SEED = '[[exovault:s4-seed:v1]]';
 const WRITE = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-const SEARCH = new Set(['Grep', 'Glob']);
-const SEARCH_BASH = /(^|[;&|(]\s*)(grep|rg|find|ls|git (log|grep|ls-files))\b/;
-const READ_BASH = /(?:^|[;&|(]\s*)(?:cat|head|tail|sed -n \S+|less|wc -l)(?:\s+-\S+)*\s+([^\s|;&<>]+)/g;
 const PRICE = Number(process.env.PRICE_PER_MTOK ?? 5);
 const WINDOW = 20;
 const IDLE_S = 120;
@@ -31,18 +29,9 @@ for (let i = 0; i < args.length; i++) {
 
 const ts = (e) => Date.parse(e.timestamp ?? '') || 0;
 const content = (e) => (e.message && typeof e.message === 'object' ? e.message.content : undefined);
-const textOf = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => b.text ?? (typeof b.content === 'string' ? b.content : '')).join('\n') : '');
-const toolUses = (e) => (e.type === 'assistant' && Array.isArray(content(e)) ? content(e).filter((b) => b.type === 'tool_use') : []);
 const isRealUser = (e) => e.type === 'user' && !e.isMeta && !e.isCompactSummary && typeof content(e) === 'string' && !content(e).startsWith(SEED) && !content(e).startsWith('<');
 const weighted = (u) => (u.input_tokens ?? 0) + 1.25 * (u.cache_creation_input_tokens ?? 0) + 0.1 * (u.cache_read_input_tokens ?? 0) + 5 * (u.output_tokens ?? 0);
 
-function readPaths(u) {
-  const i = u.input ?? {};
-  if (u.name === 'Read' || u.name === 'NotebookRead') return [String(i.file_path ?? '')].filter(Boolean);
-  if (u.name === 'Bash') return [...String(i.command ?? '').matchAll(READ_BASH)].map((m) => m[1]).filter((p) => /[/.]/.test(p));
-  return [];
-}
-const isSearch = (u) => SEARCH.has(u.name) || (u.name === 'Bash' && SEARCH_BASH.test(String(u.input?.command ?? '')));
 // A path counts as named by the seed if the seed has the full path, the repo-relative tail, or a distinctive basename.
 function named(seed, p) {
   if (seed.includes(p)) return true;
@@ -54,7 +43,8 @@ function named(seed, p) {
 
 const rows = [];
 for (const file of files) {
-  const ev = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+  const { events: parsedEvents } = await parseJsonl(file);
+  const ev = parsedEvents.map((row) => row.event);
   const bIdx = ev.map((e, i) => (e.type === 'system' && e.subtype === 'compact_boundary' ? i : -1)).filter((i) => i >= 0);
   bIdx.forEach((b, n) => {
     if (ts(ev[b]) < since) return;
@@ -63,7 +53,7 @@ for (const file of files) {
     const firstInj = ev.slice(b + 1, b + 6).find((e) => e.type === 'user');
     const injT = firstInj ? ts(firstInj) : ts(ev[b]);
     const injected = ev.slice(b + 1, end).filter((e) => ts(e) <= injT + 2000 && e.type === 'user');
-    const seed = injected.map((e) => textOf(content(e))).join('\n');
+    const seed = injected.map(eventContentText).join('\n');
     const kind = seed.includes(SEED) ? 's4' : 'native';
     const post = ev.slice(b + 1, end).filter((e) => ts(e) > injT + 2000 && e.message?.model !== '<synthetic>');
     // Continuation = the agent resumed work without a new user message first (comparable across arms).

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
 import { recallSession } from '../../plugin/compact/recall/recall.mjs';
 import { clean, blocks } from '../../plugin/compact/recall/shared.mjs';
+import { eventText, isBoundary, isSummaryEvent, parseJsonl, sessionMessage, splitBoundaries, toolCalls } from './transcript-parser.mjs';
 
 const CORE = fileURLToPath(new URL('../../plugin/compact/core', import.meta.url));
 const RECALL = fileURLToPath(new URL('../../plugin/compact/recall', import.meta.url));
@@ -55,36 +56,6 @@ const REPLAY_LABELS = process.env.REPLAY_LABELS ? labelsCore.parseLabels(fs.read
 // judged not needed; REPLAY_TOOL_KEPT_LINES=<n> is how many lines a kept output gives (default 10).
 const REPLAY_TOOL_DECISIONS = process.env.REPLAY_TOOL_DECISIONS ? new Map(fs.readFileSync(process.env.REPLAY_TOOL_DECISIONS, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((d) => d.decision === 'keep' || d.decision === 'drop').map((d) => [d.id, d.decision])) : null;
 const toolDeps = REPLAY_TOOL_DECISIONS ? { toolOutputDecision: (id) => REPLAY_TOOL_DECISIONS.get(id), toolOutputKeptLines: Number(process.env.REPLAY_TOOL_KEPT_LINES ?? 10) } : {};
-
-async function parseJsonl(file) {
-  const events = [];
-  let malformed = 0;
-  const input = fs.createReadStream(file, { encoding: 'utf8' });
-  let pending = '';
-  for await (const chunk of input) {
-    pending += chunk;
-    let nl;
-    while ((nl = pending.indexOf('\n')) >= 0) {
-      const line = pending.slice(0, nl).replace(/\r$/, ''); pending = pending.slice(nl + 1);
-      if (!line.trim()) continue;
-      try { events.push({ event: JSON.parse(line), line }); } catch { malformed++; }
-    }
-  }
-  if (pending.trim()) { try { events.push({ event: JSON.parse(pending), line: pending }); } catch { malformed++; } }
-  return { events, malformed };
-}
-
-function eventText(event) { return clean(blocks(event?.message?.content)); }
-function sessionMessage(event) {
-  const content = event.message?.content;
-  const parts = Array.isArray(content) ? content : [];
-  const toolUses = parts.filter((x) => x?.type === 'tool_use').map((x) => ({ tool_use_id: x.id, tool: x.name, input: x.input }));
-  const toolResults = parts.filter((x) => x?.type === 'tool_result').map((x) => ({ tool_use_id: x.tool_use_id, isError: !!x.is_error, text: blocks(x.content) }));
-  return { role: event.type === 'assistant' ? 'assistant' : 'user', text: typeof content === 'string' ? content : parts.filter((x) => x?.type === 'text').map((x) => x.text ?? '').join('\n'), toolUses, ...(toolResults.length ? { toolResults } : {}) };
-}
-function isSummaryEvent(e) { return e.type === 'user' && (e.isCompactSummary === true || e.message?.isCompactSummary === true); }
-function isBoundary(e) { return e.type === 'system' && e.subtype === 'compact_boundary'; }
-function toolCalls(event) { return Array.isArray(event.message?.content) ? event.message.content.filter((x) => x?.type === 'tool_use') : []; }
 
 const WORD = /\S+/g;
 function contextWithout(text, start, end) {
@@ -475,10 +446,7 @@ export async function labelTargets(file) {
   return [...out.values()];
 }
 export { lowerContains as coverageContains, rereads as detectRereads };
-export function splitBoundaries(events) {
-  const indices = events.map((x, i) => isBoundary(x.event ?? x) ? i : -1).filter((i) => i >= 0);
-  return indices.map((index, n) => ({ start: index, end: indices[n + 1] ?? events.length }));
-}
+export { splitBoundaries };
 export async function main(argv = process.argv.slice(2)) {
   const paths = []; let out;
   for (let i = 0; i < argv.length; i++) {
