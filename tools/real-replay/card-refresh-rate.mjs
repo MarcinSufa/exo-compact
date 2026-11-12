@@ -34,7 +34,7 @@ function parseArgs(argv) {
   return { root, sinceText, since: Date.parse(sinceText), json };
 }
 
-function findNoticeFiles(root) {
+export function findNoticeFiles(root) {
   let stat;
   try { stat = fs.statSync(root); } catch { throw new Error('Capture root does not exist'); }
   if (!stat.isDirectory()) throw new Error('Capture root must be a directory');
@@ -82,13 +82,26 @@ function parseNoticeLine(line, order) {
   if (/task_card\.refresh=/.test(text)) return { type: 'unparseable', order, time };
   if (CUT_NOTICE_RE.test(text)) return { type: 'cut', time, order };
   if (/\bcompacted\b/.test(text)) return { type: 'unparseable', order, time };
+  const taskCardPresent = /\bseed\.task_card=([01])(?:\s|$)/.exec(text);
+  const taskCardSize = /\bseed\.task_card_size=(\d+)\b/.exec(text);
+  const taskCardShrunk = /\bseed\.task_card_shrunk=(\d+)\b/.exec(text);
+  const taskCardDropped = /\bseed\.task_card_dropped=1\b/.test(text);
+  if (taskCardPresent || taskCardSize || taskCardShrunk || taskCardDropped) {
+    const seedCardNotice = {
+      present: taskCardPresent ? taskCardPresent[1] === '1' : undefined,
+      size: taskCardSize ? Number(taskCardSize[1]) : undefined,
+      shrunk: Boolean(taskCardShrunk),
+      dropped: taskCardDropped,
+    };
+    if (taskCardPresent?.[1] === '1') return { type: 'reader', time, order, readerKind: 's4_seed_fell_back', seedCardNotice };
+    return { type: 'seed_card_notice', time, order, seedCardNotice };
+  }
   if (/^rule_check\.fired=[01]\s+broken=\d+\b/.test(text)) return { type: 'reader', time, order, readerKind: 'rule_check' };
   if (/^brief_check\.fired=1\s+source=card(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 'card_check' };
-  if (/\bseed\.task_card=1(?:\s|$)/.test(text)) return { type: 'reader', time, order, readerKind: 's4_seed_fell_back' };
   return undefined;
 }
 
-function readSession(file, since) {
+export function readSession(file, since) {
   let contents;
   try {
     contents = fs.readFileSync(file, 'utf8');

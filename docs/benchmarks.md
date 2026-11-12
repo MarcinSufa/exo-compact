@@ -289,6 +289,9 @@ The plugin's recorded card size is a conservative-high token estimate and can ex
 so this card figure is approximate and is not a strict lower bound. The notices do not record actual
 model usage.
 
+For card-history coverage, unchanged-pair estimates, predictors, and near-cut coalescing results, see
+[Task-card refresh skip analysis](card-refresh-skip.md).
+
 To compare card refreshes with an allowance per cut, refresh estimates are summed over the same
 session interval, from the previous cut boundary through the boundary ending that interval. Of the
 400 paired refreshes, 103 fall in intervals ending at native cuts in mixed sessions and are left
