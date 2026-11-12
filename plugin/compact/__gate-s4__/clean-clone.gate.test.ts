@@ -48,8 +48,10 @@ describe('clean clone: typecheck and CI', () => {
   });
 
   it('npm test (so CI) runs every test file under tools/ with the runner it is written for, the installer tests included', () => {
-    const script: string = readJson('package.json').scripts.test;
-    const [vitestPart, nodePart] = script.split(' && ');
+    const scripts: Record<string, string> = readJson('package.json').scripts;
+    expect(scripts.test).toBe('npm run test:vitest && npm run test:node');
+    const vitestPart = scripts['test:vitest'];
+    const nodePart = scripts['test:node'];
     expect(vitestPart).toMatch(/^vitest run /);
     expect(nodePart).toMatch(/^node .*--test /);
     // Without .git (a published tree, also one inside another checkout) the files on disk stand in for the tracked ones.

@@ -392,7 +392,7 @@ describe('doctor: the installed version against the latest release', () => {
     expect(check.message).toContain('pull --ff-only');
   });
 
-  it('real git: an install cloned at an older tag, then the update command it prints moves the clone to the new one', () => {
+  it('real git: an install cloned at an older tag, then the update command it prints moves the clone to the new one', { skip: process.platform === 'win32' ? 'PowerShell 5.1 update form at doctor.mjs:327 is covered by "on Windows the command is PowerShell 5.1 safe: no &&, the path in single quotes"' : false }, () => {
     const git = (cwd: string, ...args: string[]) => {
       const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'core.hooksPath=', ...args], { cwd, encoding: 'utf8' });
       if (result.status !== 0) throw new Error(result.stderr);

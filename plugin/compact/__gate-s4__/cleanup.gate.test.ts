@@ -199,7 +199,7 @@ describe('cleanup command: re-redact stored data', () => {
       expect(summary.backup?.file).toBe(path.join(home, '.exovault', `backup-${date}.tar.gz`));
       expect(summary.backup?.files).toBe(summary.redact.files);
       const backup = summary.backup!.file;
-      expect(statSync(backup).mode & 0o777).toBe(0o600);
+      if (process.platform !== 'win32') expect(statSync(backup).mode & 0o777).toBe(0o600);
       const listed = spawnSync('tar', ['-tzf', backup], { encoding: 'utf8' }).stdout;
       expect(listed).toMatch(/generation-00000001\/records\.json/);
       expect(listed).toMatch(/briefs\/aaaaaaaaaaaa\.md/);
@@ -214,7 +214,7 @@ describe('cleanup command: re-redact stored data', () => {
       const rows = JSON.parse(readFileSync(path.join(dir, 'generation-00000002', 'records.json'), 'utf8')) as { text: string; sourceId: string }[];
       expect(rows.map((row) => row.text)).toEqual(['token [redacted]', 'nothing secret here']);
       expect(rows[0].sourceId).toBe('r0');
-      expect(statSync(path.join(dir, 'generation-00000002', 'records.json')).mode & 0o777).toBe(0o600);
+      if (process.platform !== 'win32') expect(statSync(path.join(dir, 'generation-00000002', 'records.json')).mode & 0o777).toBe(0o600);
       expect(readFileSync(path.join(dir, 'briefs', 'aaaaaaaaaaaa.md'), 'utf8')).toBe('Use [redacted] in the deploy step\nsecond line');
       expect(readFileSync(path.join(dir, 'search-calls.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
       // A second run finds nothing left to do and writes no second backup.
@@ -629,13 +629,16 @@ describe('automatic retention', () => {
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
-  it('does not follow symlinks while scanning tombstones', () => {
+  it('does not follow symlinks while scanning tombstones', (context) => {
     const home = tempHome();
     try {
       const outside = path.join(home, 'outside.txt');
       writeFileSync(outside, 'outside data');
       const tombstone = writeTombstone(home, 'symlink-retention', { 'ordinary.txt': 'keep in tombstone' });
-      symlinkSync(outside, path.join(tombstone.dir, 'link.txt'));
+      try { symlinkSync(outside, path.join(tombstone.dir, 'link.txt')); } catch (error) {
+        if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) context.skip('Windows may deny symlink creation without Developer Mode or the required privilege');
+        throw error;
+      }
       mkdirSync(tombstone.canonical, { recursive: true });
       const summary = cleanup({ home, days: 30, apply: true });
       expect(summary.prune.tombstones).toMatchObject({ left: 1 });
@@ -1177,14 +1180,17 @@ describe('cleanup command: capture directories', () => {
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
-  it('a capture root that is a symlink is not followed', () => {
+  it('a capture root that is a symlink is not followed', (context) => {
     const home = tempHome();
     const elsewhere = tempHome();
     try {
       const target = writeKeyedCapture(elsewhere, 'session-x');
       writeKeyedCapture(elsewhere, 'session-old', 40 * DAY);
       mkdirSync(path.join(home, '.exovault'), { recursive: true });
-      symlinkSync(path.join(elsewhere, '.exovault', 's4-capture'), path.join(home, '.exovault', 's4-capture'));
+      try { symlinkSync(path.join(elsewhere, '.exovault', 's4-capture'), path.join(home, '.exovault', 's4-capture')); } catch (error) {
+        if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) context.skip('Windows may deny symlink creation without Developer Mode or the required privilege');
+        throw error;
+      }
       const before = snapshot(path.join(elsewhere, '.exovault'));
       const { summary, status, stderr } = run(home, ['--apply']);
       expect(status, stderr).toBe(0);

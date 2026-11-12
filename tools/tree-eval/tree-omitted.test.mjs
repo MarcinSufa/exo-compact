@@ -87,7 +87,7 @@ describe('hydrateTree with omitted ids', () => {
 });
 
 describe('runClaude with an unparsable reply', () => {
-  it('resolves with no merges and the paid cost, and keeps the reply for diagnosis', async () => {
+  it('resolves with no merges and the paid cost, and keeps the reply for diagnosis', { skip: process.platform === 'win32' ? 'TREE_CLAUDE is a POSIX shell fixture' : false }, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tree-bad-reply-'));
     const fake = path.join(dir, 'fake-claude.sh');
     const result = { type: 'result', result: 'Here are the merged summaries, one per line.', total_cost_usd: 0.012, stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 20 } };

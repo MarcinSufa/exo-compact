@@ -28,16 +28,29 @@ function sandbox() {
   fs.mkdirSync(bin);
   const cwd = path.join(dir, 'project');
   fs.mkdirSync(cwd);
-  const stub = path.join(bin, 'claude');
-  fs.writeFileSync(stub, [
-    '#!/bin/sh',
-    'if [ "$1" = "--version" ]; then echo "2.1.299 (Claude Code)"; exit 0; fi',
-    `exec "${process.execPath}" -e '`,
-    'const fs = require("fs"); const args = process.argv.slice(1); const at = args.indexOf("--settings");',
-    'console.log(JSON.stringify({ args, window: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null, hooks: process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS ?? null, settings: at >= 0 ? JSON.parse(args[at + 1].startsWith("{") ? args[at + 1] : fs.readFileSync(args[at + 1], "utf8")) : null }));',
-    `' -- "$@"`,
-    '',
-  ].join('\n'), { mode: 0o755 });
+  const stub = path.join(bin, process.platform === 'win32' ? 'claude.cmd' : 'claude');
+  if (process.platform === 'win32') {
+    const report = "const fs = require('fs'); const args = process.argv.slice(1); const at = args.indexOf('--settings'); console.log(JSON.stringify({ args, window: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null, hooks: process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS ?? null, settings: at >= 0 ? JSON.parse(args[at + 1].startsWith('{') ? args[at + 1] : fs.readFileSync(args[at + 1], 'utf8')) : null }));";
+    fs.writeFileSync(stub, [
+      '@echo off',
+      'if "%~1"=="--version" (',
+      '  echo 2.1.299 ^(Claude Code^)',
+      '  exit /b 0',
+      ')',
+      `"${process.execPath}" -e "${report}" -- %*`,
+      '',
+    ].join('\r\n'));
+  } else {
+    fs.writeFileSync(stub, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo "2.1.299 (Claude Code)"; exit 0; fi',
+      `exec "${process.execPath}" -e '`,
+      'const fs = require("fs"); const args = process.argv.slice(1); const at = args.indexOf("--settings");',
+      'console.log(JSON.stringify({ args, window: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null, hooks: process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS ?? null, settings: at >= 0 ? JSON.parse(args[at + 1].startsWith("{") ? args[at + 1] : fs.readFileSync(args[at + 1], "utf8")) : null }));',
+      `' -- "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+  }
   const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: path.join(dir, 'cfg'), HOME: dir };
   return { dir, cwd, env };
 }

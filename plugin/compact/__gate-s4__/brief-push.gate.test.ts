@@ -1,6 +1,6 @@
 import { LEGACY_OPTIONS } from './fixtures/helpers.js';
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -239,7 +239,7 @@ function repoWith(files: Record<string, string>): string {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'brief-limits-'));
   const git = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args]);
   git('init', '-q');
-  for (const [file, text] of Object.entries(files)) { execFileSync('mkdir', ['-p', path.dirname(path.join(repo, file))]); writeFileSync(path.join(repo, file), text); }
+  for (const [file, text] of Object.entries(files)) { mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); writeFileSync(path.join(repo, file), text); }
   git('add', '.');
   git('commit', '-qm', 'base');
   return repo;
@@ -255,7 +255,7 @@ describe('3.41.0 (S4zm) brief line-length limits after a write', () => {
     const root = rootWithBriefs('s1', [LIMIT_BRIEF]);
     const repo = repoWith({ 'src/old.ts': `${'o'.repeat(150)}\nb\n` });
     writeFileSync(path.join(repo, 'src/old.ts'), `${'o'.repeat(150)}\nb\n${'x'.repeat(161)}\n`);
-    execFileSync('mkdir', ['-p', path.join(repo, 'test')]);
+    mkdirSync(path.join(repo, 'test'), { recursive: true });
     writeFileSync(path.join(repo, 'test/r2-pill.test.tsx'), `ok\n${'y'.repeat(160)}\n${'z'.repeat(300)}\n`);
     const warnings = limitWarnings(root, 's1', path.join(repo, 'test'), ['src/old.ts', 'r2-pill.test.tsx']);
     expect(warnings).toHaveLength(2);

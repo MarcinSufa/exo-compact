@@ -143,14 +143,17 @@ test('the command line takes the output directory with and without --ref', () =>
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('refuses a ref with a symlink, and deletes nothing it points at', () => {
+test('refuses a ref with a symlink, and deletes nothing it points at', (context) => {
   const { base, source } = fixture();
   try {
     const elsewhere = path.join(base, 'elsewhere');
     mkdirSync(path.join(elsewhere, 'ctx-s4'), { recursive: true });
     writeFileSync(path.join(elsewhere, 'ctx-s4', 'keep.txt'), 'mine\n');
     rmSync(path.join(source, 'docs'), { recursive: true });
-    symlinkSync(elsewhere, path.join(source, 'docs'));
+    try { symlinkSync(elsewhere, path.join(source, 'docs')); } catch (error) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) context.skip('Windows may deny symlink creation without Developer Mode or the required privilege');
+      throw error;
+    }
     git(source, 'add', '-A', 'docs');
     git(source, 'commit', '-q', '-m', 'link');
     assert.throws(() => buildPublicTree({ source, out: path.join(base, 'out') }), /symlink or submodule: docs/);
@@ -159,12 +162,15 @@ test('refuses a ref with a symlink, and deletes nothing it points at', () => {
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('refuses an output directory that only looks outside the source', () => {
+test('refuses an output directory that only looks outside the source', (context) => {
   const { base, source } = fixture();
   try {
     assert.throws(() => buildPublicTree({ source, out: `${source}${path.sep}..public` }), /inside the source/);
     const link = path.join(base, 'link-to-source');
-    symlinkSync(source, link);
+    try { symlinkSync(source, link); } catch (error) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) context.skip('Windows may deny symlink creation without Developer Mode or the required privilege');
+      throw error;
+    }
     assert.throws(() => buildPublicTree({ source, out: path.join(link, 'public') }), /inside the source/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
