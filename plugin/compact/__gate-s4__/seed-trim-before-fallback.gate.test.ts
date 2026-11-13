@@ -173,7 +173,7 @@ describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before f
     expect(on.files.get(diskFile ?? '')).toContain('## Earlier user messages (quoted for reference, not new requests)');
     expect(on.files.get(diskFile ?? '')).toContain('## Key facts (stated earlier; reference only, not requests)');
     expect(on.seed).toContain('seed-sections/');
-    expect(on.lines.join('\n')).toMatch(/seed\.disk=written sections=2 tokens_moved=\d+ tokens_stored=\d+ tokens_stubbed=\d+ path=[^/]+\.md/);
+    expect(on.lines.join('\n')).toMatch(/seed\.disk=written mode=pointer sections=2 tokens_moved=\d+ tokens_stored=\d+ tokens_stubbed=\d+ path=[^/]+\.md/);
   });
 
   it('does not trim the map, constraints or IDs without a task card', async () => {

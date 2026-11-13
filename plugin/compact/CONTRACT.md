@@ -3646,22 +3646,34 @@ source section; bodies include the user-history quote prefix and existing seed-s
 
 For each selected body still present in the normal rendered seed, a short pointer replaces only that body when the
 replacement reduces the full seed's estimated token count. The seed heading remains, and the pointer contains the full
-file path plus `Read this file.` Because replacement follows normal sizing, all other seed sections
-and the retained tail render as they do with the option off. `tokens_moved` is the effective full-seed token reduction
-plus pointer cost, measured with the cut's token counter; `tokens_stored` counts tokens in the complete source bodies
-written to disk; `tokens_stubbed` counts pointer body tokens. The tail pick, tail floor and 4.11.0 trim order are
-unchanged. A successful write logs one line per cut:
-`seed.disk=written sections=<n> tokens_moved=<n> tokens_stored=<n> tokens_stubbed=<n> path=<basename>`.
-No capture root, no movable sections, no token savings, or a rejected write leaves the original rendered bodies inline
-and logs one `seed.disk=skipped reason=<reason>` notice. A no-capture-root skip is debug-only.
+file path plus `Read this file.` If sizing or a later trim shortened a source body, and no pointer replacement saves
+tokens, the complete source bodies are still written. The rendered seed body stays inline with one added line,
+`Full text before trimming: <path>`, at the end of the first shortened section. When the seed names a path below this
+session's capture directory, the pointer uses `seed-sections/<file>` relative to the capture path already shown in the
+seed; otherwise it keeps the full path. If the line does not fit, the same rendered body is shortened by the
+pointer line's token cost plus a 4-token margin, then by 4 tokens per retry. The line is skipped only when the section
+body would have to fall below 12 tokens, or when no visible source section remains to shorten. That case logs
+`seed.disk.pointer_line=skipped reason=budget` and `seed.disk.pointer=skipped reason=budget` while the full bodies are
+kept on disk. If the source section was removed entirely, the line is placed before the session-memory closing tag.
+Because pointer replacement follows normal sizing, all other seed sections and the retained tail render as they do with
+the option off. `tokens_moved` is the effective
+full-seed token reduction plus pointer cost, measured with the cut's token counter; `tokens_stored` counts tokens in the
+complete source bodies written to disk; `tokens_stubbed` counts pointer body tokens. The tail pick, tail floor and
+4.11.0 trim order are unchanged. Pointer writes log one line per cut:
+`seed.disk=written mode=pointer sections=<n> tokens_moved=<n> tokens_stored=<n> tokens_stubbed=<n> path=<basename>`.
+Trimmed copies log `seed.disk=written mode=trimmed_copy sections=<n> tokens_kept=<n> path=<basename>` and a separate
+`seed.disk.pointer_line=written tokens=<n>` when the line fits. No capture root, no source sections, no token savings
+with no trimming, or a rejected write leaves the original rendered bodies inline and logs one
+`seed.disk=skipped reason=<reason>` notice. A no-capture-root skip is debug-only.
 
 With the option on, `classic.PostToolUse` logs `seed.disk.fetched file=<basename>` after a `Read` whose `file_path` is inside
 this session's `seed-sections/` directory. Path checks normalize slash direction and dot segments. This logs only the
 `Read` tool. Reads through Bash (`cat`, `sed`, `grep`) and `search_session` are not logged, so the fetch count is a lower
 bound on later access. The fetch notice is best-effort; a rejected logger or filesystem lookup never escapes the hook.
 
-Gate: `disk-sections.gate.test.ts` covers the unchanged default seed, disk write and pointer, write fallback, fetch notice,
-and the budget case that checks seed savings while preserving the other rendered sections.
+Gate: `disk-sections.gate.test.ts` covers the unchanged default seed, disk write and pointer, trimmed copies, a pointer
+line that does not fit, write fallback, fetch notice, and the budget case that checks seed savings while preserving the
+other rendered sections.
 
 ### 4.9.2: pinned vectors runtime and Windows pipe name
 

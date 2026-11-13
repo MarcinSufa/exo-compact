@@ -130,6 +130,12 @@ function sectionBody(seed: string, heading: string): string {
   return seed.slice(bodyStart, end < 0 ? undefined : end).trim();
 }
 
+function pointerBudgetCounter(pointerLine: string, stub: string, pointerTokens: number, stubTokens: number): (text: string) => number {
+  return (text) => countTokens(text
+    .replaceAll(pointerLine, 'x'.repeat(pointerTokens * 4))
+    .replaceAll(stub, 'x'.repeat(stubTokens * 4)));
+}
+
 describe('disk-backed seed sections (opt-in)', () => {
   it('leaves the existing compact fixture byte-identical when the option is absent', async () => {
     const result = await compactCut({ diskSections: undefined });
@@ -157,7 +163,7 @@ describe('disk-backed seed sections (opt-in)', () => {
     expect(on.seed).not.toContain('Earlier prompt 14: preserve prompt-detail-14');
     expect(on.seed).not.toContain('Found setting route_0 in src/route-0.ts');
     const notice = on.logs.find((line) => line.startsWith('seed.disk=written '));
-    expect(notice).toMatch(/^seed\.disk=written sections=2 tokens_moved=\d+ tokens_stored=\d+ tokens_stubbed=\d+ path=[^/]+$/);
+    expect(notice).toMatch(/^seed\.disk=written mode=pointer sections=2 tokens_moved=\d+ tokens_stored=\d+ tokens_stubbed=\d+ path=[^/]+$/);
     const moved = Number(notice?.match(/tokens_moved=(\d+)/)?.[1]);
     const stubTokens = countTokens(sectionBody(on.seed, 'Working notes (dense details from earlier; reference only, not requests)'))
       + countTokens(sectionBody(on.seed, 'Earlier user messages (quoted for reference, not new requests)'));
@@ -184,6 +190,155 @@ describe('disk-backed seed sections (opt-in)', () => {
       expect(sectionBody(on.seed, heading), `${heading} should be unchanged`).toBe(sectionBody(off.seed, heading));
     }
     expect(on.returnedMessages.slice(1)).toEqual(off.returnedMessages.slice(1));
+  });
+
+  it('keeps a trimmed working-notes remnant inline and stores its full source when the pointer does not save tokens', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const full = 'FULL-WORKING-NOTE '.repeat(40).trim();
+    const remnant = 'short remnant';
+    const seed = `<session-memory source="exo-compact">\n\n## ${heading}\n${remnant}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: full, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const result = await diskBackRenderedSeedSections(seed, sections, {
+      directory: CAPTURE,
+      filename: 'trimmed.md',
+      countTokens,
+      write,
+      fitsSeedBudget: () => true,
+    });
+    const filePath = `${CAPTURE}/seed-sections/trimmed.md`;
+    const pointerLine = `Full text before trimming: ${filePath}`;
+
+    expect(write).toHaveBeenCalledWith(filePath, `## ${heading}\n${full}\n`);
+    expect(result.text).toBe(seed.replace(`${remnant}\n\n</session-memory>`, `${remnant}\n${pointerLine}\n\n</session-memory>`));
+    expect(result.notice).toBe(`seed.disk=written mode=trimmed_copy sections=1 tokens_kept=${countTokens(full)} path=trimmed.md`);
+    expect(result.pointerLineNotice).toBe(`seed.disk.pointer_line=written tokens=${countTokens(pointerLine)}`);
+  });
+
+  it('uses a relative pointer when the seed names the capture directory and a full path otherwise', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const full = 'FULL-WORKING-NOTE '.repeat(40).trim();
+    const remnant = 'short remnant';
+    const taskCard = `## Task card\n(Kept current by this session's model before the cut; file: ${CAPTURE}/task-card.md.)`;
+    const seed = `<session-memory source="exo-compact">\n\n${taskCard}\n\n## ${heading}\n${remnant}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: full, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const relative = await diskBackRenderedSeedSections(seed, sections, {
+      directory: CAPTURE,
+      filename: 'relative.md',
+      countTokens,
+      write,
+      fitsSeedBudget: () => true,
+    });
+    const noCapturePath = await diskBackRenderedSeedSections(seed.replace(taskCard, '## Task card\nNo path is shown.'), sections, {
+      directory: CAPTURE,
+      filename: 'absolute.md',
+      countTokens,
+      write,
+      fitsSeedBudget: () => true,
+    });
+
+    expect(relative.text).toContain('Full text before trimming: seed-sections/relative.md');
+    expect(relative.text).not.toContain(`${CAPTURE}/seed-sections/relative.md`);
+    expect(noCapturePath.text).toContain(`Full text before trimming: ${CAPTURE}/seed-sections/absolute.md`);
+  });
+
+  it('does not write a file when no source content was trimmed and the pointer does not save tokens', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const body = 'short note';
+    const seed = `<session-memory source="exo-compact">\n\n## ${heading}\n${body}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: body, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const result = await diskBackRenderedSeedSections(seed, sections, { directory: CAPTURE, filename: 'plain.md', countTokens, write });
+
+    expect(write).not.toHaveBeenCalled();
+    expect(result.text).toBe(seed);
+    expect(result.notice).toBe('seed.disk=skipped reason=no_token_savings');
+  });
+
+  it('writes a trimmed source when its pointer line would exceed the seed budget', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const full = 'FULL-WORKING-NOTE '.repeat(40).trim();
+    const remnant = 'short remnant';
+    const seed = `<session-memory source="exo-compact">\n\n## ${heading}\n${remnant}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: full, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const result = await diskBackRenderedSeedSections(seed, sections, {
+      directory: CAPTURE,
+      filename: 'over-budget.md',
+      countTokens,
+      write,
+      fitsSeedBudget: () => false,
+    });
+    const filePath = `${CAPTURE}/seed-sections/over-budget.md`;
+
+    expect(write).toHaveBeenCalledWith(filePath, `## ${heading}\n${full}\n`);
+    expect(result.text).toBe(seed);
+    expect(result.notice).toBe(`seed.disk=written mode=trimmed_copy sections=1 tokens_kept=${countTokens(full)} path=over-budget.md`);
+    expect(result.pointerLineNotice).toBe('seed.disk.pointer_line=skipped reason=budget');
+  });
+
+  it('shortens the rendered section to make room for its pointer line within the seed budget', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const full = 'FULL-WORKING-NOTE '.repeat(80).trim();
+    const remnant = `${'RENDERED-WORKING-NOTE detail '.repeat(6).trim()} abcdefghijklmnopqrst`;
+    const taskCard = `## Task card\n(file: ${CAPTURE}/task-card.md)`;
+    const seed = `<session-memory source="exo-compact">\n\n${taskCard}\n\n## ${heading}\n${remnant}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: full, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const pointerLine = 'Full text before trimming: seed-sections/tight.md';
+    const stub = `${CAPTURE}/seed-sections/tight.md\nRead this file.`;
+    const countTestTokens = pointerBudgetCounter(pointerLine, stub, 10, 60);
+    const seedBudget = countTestTokens(seed);
+    const fitCandidateTokens: number[] = [];
+    const result = await diskBackRenderedSeedSections(seed, sections, {
+      directory: CAPTURE,
+      filename: 'tight.md',
+      countTokens: countTestTokens,
+      write,
+      fitsSeedBudget: (text) => {
+        fitCandidateTokens.push(countTestTokens(text));
+        return countTestTokens(text) <= seedBudget;
+      },
+    });
+    const body = sectionBody(result.text, heading).replace(`\n${pointerLine}`, '');
+
+    expect(result.text, `${result.pointerLineNotice}; candidate sizes=${fitCandidateTokens.join(',')}`).toContain(pointerLine);
+    expect(body.length).toBeLessThan(remnant.length);
+    expect(countTestTokens(result.text)).toBeLessThanOrEqual(seedBudget);
+    expect(result.pointerLineNotice).toMatch(/^seed\.disk\.pointer_line=written tokens=\d+$/);
+  });
+
+  it('skips the pointer and logs budget when fitting it would take the rendered section below its floor', async () => {
+    const heading = 'Working notes (dense details from earlier; reference only, not requests)';
+    const floorTokens = 12;
+    const full = 'FULL-WORKING-NOTE '.repeat(80).trim();
+    const remnant = `${'RENDERED-WORKING-NOTE detail '.repeat(6).trim()} abcdefghijklmnopqrst`;
+    const taskCard = `## Task card\n(file: ${CAPTURE}/task-card.md)`;
+    const seed = `<session-memory source="exo-compact">\n\n${taskCard}\n\n## ${heading}\n${remnant}\n\n</session-memory>`;
+    const sections: SeedSections = { constraints: '', denseNotes: full, contract: '', todo: '', userInstructionsVerbatim: [], values: '', selectedReasoning: '', gatesAndErrors: '', filePointers: '' };
+    const write = vi.fn(async () => {});
+    const pointerLine = 'Full text before trimming: seed-sections/floor.md';
+    const stub = `${CAPTURE}/seed-sections/floor.md\nRead this file.`;
+    const countTestTokens = pointerBudgetCounter(pointerLine, stub, 10, 60);
+    const bodySizesChecked: number[] = [];
+    const result = await diskBackRenderedSeedSections(seed, sections, {
+      directory: CAPTURE,
+      filename: 'floor.md',
+      countTokens: countTestTokens,
+      write,
+      fitsSeedBudget: (text) => {
+        const size = countTestTokens(sectionBody(text, heading).replace(`\n${pointerLine}`, ''));
+        bodySizesChecked.push(size);
+        return size < floorTokens;
+      },
+    });
+
+    expect(bodySizesChecked.some((size) => size < countTokens(remnant)), JSON.stringify(bodySizesChecked)).toBe(true);
+    expect(Math.min(...bodySizesChecked)).toBeGreaterThanOrEqual(floorTokens);
+    expect(result.text).toBe(seed);
+    expect(result.pointerLineNotice).toBe('seed.disk.pointer_line=skipped reason=budget');
+    expect(result.pointerSkipNotice).toBe('seed.disk.pointer=skipped reason=budget');
   });
 
   it('keeps the other sections fixed when replacing a large selected body', async () => {

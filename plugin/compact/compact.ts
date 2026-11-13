@@ -1454,9 +1454,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
                 filename,
                 countTokens,
                 write: (path, text) => $.fs.write(path, text),
+                fitsSeedBudget: (text) => checkBudget(countTokens(text), tailTokensForBudget, budgets).ok,
               });
               if (diskResult.notice === 'seed.disk=skipped reason=no_capture_root') notice.debug(diskResult.notice);
               else notice(diskResult.notice);
+              if (diskResult.pointerLineNotice) {
+                try { notice(diskResult.pointerLineNotice); } catch { /* pointer-line diagnostics cannot stop this cut */ }
+              }
+              if (diskResult.pointerSkipNotice) {
+                try { notice(diskResult.pointerSkipNotice); } catch { /* pointer skip logging cannot stop this cut */ }
+              }
               if (diskResult.notice.startsWith('seed.disk=written ')) {
                 const text = diskResult.text;
                 rendered = { ...rendered, message: { ...rendered.message, text }, tokens: countTokens(text) };

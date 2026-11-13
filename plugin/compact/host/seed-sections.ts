@@ -9,6 +9,8 @@ interface DiskSeedSectionsOptions {
   filename: string;
   countTokens: TokenCounter;
   write: (path: string, text: string) => Promise<void>;
+  /** Whether adding a seed line keeps the completed cut within its seed and total-token budgets. */
+  fitsSeedBudget?: (text: string) => boolean;
 }
 
 export interface DiskRenderedSeedSectionsResult {
@@ -17,6 +19,8 @@ export interface DiskRenderedSeedSectionsResult {
   tokensMoved: number;
   tokensStored: number;
   stubTokens: number;
+  pointerLineNotice?: string;
+  pointerSkipNotice?: string;
 }
 
 const SECTION_KEYS: Readonly<Record<string, string>> = {
@@ -42,6 +46,9 @@ const SECTION_KEYS: Readonly<Record<string, string>> = {
   'Next step': 'nextStep',
   'IDs (short = full)': 'ids',
 };
+
+const POINTER_LINE_MARGIN_TOKENS = 4;
+const POINTER_LINE_SECTION_FLOOR_TOKENS = 12;
 
 /** Normalize slash direction and dot segments before comparing host paths. */
 export function normalizedFilePath(filePath: string): string {
@@ -114,6 +121,46 @@ function stub(path: string): string {
   return `${path}\nRead this file.`;
 }
 
+function pointerLine(seedText: string, directory: string, filename: string, filePath: string): string {
+  const captureDirectory = normalizedFilePath(directory).replace(/\/+$/, '');
+  const normalizedSeed = seedText.replace(/\\/g, '/');
+  if (!normalizedSeed.includes(`${captureDirectory}/`)) return `Full text before trimming: ${filePath}`;
+  return `Full text before trimming: seed-sections/${filename}`;
+}
+
+function truncateBodyToTokenCount(body: string, maxTokens: number, countTokens: TokenCounter): string {
+  const characters = Array.from(body);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = `${characters.slice(0, middle).join('').trimEnd()}…`;
+    if (countTokens(candidate) <= maxTokens) low = middle;
+    else high = middle - 1;
+  }
+  let prefix = characters.slice(0, low).join('').trimEnd();
+  const whitespaceBoundary = Math.max(prefix.lastIndexOf('\n'), prefix.lastIndexOf(' '));
+  if (whitespaceBoundary > 0) {
+    const readablePrefix = prefix.slice(0, whitespaceBoundary).trimEnd();
+    if (readablePrefix && countTokens(`${readablePrefix}…`) <= maxTokens
+      && countTokens(`${readablePrefix}…`) >= maxTokens - POINTER_LINE_MARGIN_TOKENS) {
+      prefix = readablePrefix;
+    }
+  }
+  return prefix ? `${prefix}…` : '';
+}
+
+function insertPointerLine(seedText: string, row: { bodyStart: number; bodyEnd: number } | undefined, line: string, body?: string): string {
+  if (row) {
+    const renderedBody = body ?? seedText.slice(row.bodyStart, row.bodyEnd).trim();
+    return `${seedText.slice(0, row.bodyStart)}${renderedBody}\n${line}${seedText.slice(row.bodyEnd)}`;
+  }
+  const close = seedText.lastIndexOf('</session-memory>');
+  const separator = close < 0 ? -1 : seedText.lastIndexOf('\n\n', close);
+  const insertAt = close < 0 ? seedText.length : separator >= 0 ? separator : close;
+  return `${seedText.slice(0, insertAt)}\n${line}${seedText.slice(insertAt)}`;
+}
+
 /** Store the original section bodies, then replace only their rendered bodies after normal sizing. */
 export async function diskBackRenderedSeedSections(
   seedText: string,
@@ -138,7 +185,12 @@ export async function diskBackRenderedSeedSections(
     return body ? [{ ...heading, body, bodyEnd, separator: segment.slice(body.length) }] : [];
   });
   const sourceRows = sectionBodies(sourceSections);
-  if (selected.length === 0 || sourceRows.length === 0) return { text: seedText, notice: 'seed.disk=skipped reason=no_sections', tokensMoved: 0, tokensStored: 0, stubTokens: 0 };
+  if (sourceRows.length === 0) return { text: seedText, notice: 'seed.disk=skipped reason=no_sections', tokensMoved: 0, tokensStored: 0, stubTokens: 0 };
+
+  const trimmedRows = sourceRows.filter((source) => {
+    const rendered = selected.find((row) => row.key === source.key);
+    return rendered === undefined || rendered.body.length < source.body.length;
+  });
 
   const filename = options.filename.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'cut.md';
   const directory = options.directory.replace(/[\\/]$/, '');
@@ -164,19 +216,71 @@ export async function diskBackRenderedSeedSections(
     replacements.push(row);
     stubTokens += pointerTokens;
   }
-  if (replacements.length === 0) return { text: seedText, notice: 'seed.disk=skipped reason=no_token_savings', tokensMoved: 0, tokensStored: 0, stubTokens: 0 };
+  if (replacements.length === 0 && trimmedRows.length === 0) return { text: seedText, notice: 'seed.disk=skipped reason=no_token_savings', tokensMoved: 0, tokensStored: 0, stubTokens: 0 };
 
   const contents = `${sourceRows.map(({ heading, body }) => `## ${heading}\n${body}`).join('\n\n')}\n`;
+  const tokensStored = sourceRows.reduce((total, row) => total + options.countTokens(row.body), 0);
+  let pointerLineNotice: string | undefined;
+  let pointerSkipNotice: string | undefined;
+  if (replacements.length === 0) {
+    const pointer = guardSectionBody(pointerLine(seedText, directory, filename, filePath));
+    const visibleTrimmed = trimmedRows
+      .map((source) => selected.find((row) => row.key === source.key))
+      .find((row) => row !== undefined)
+      // A different source section may have been dropped entirely while another disk-backed section remains visible.
+      // Put the shared file pointer in that surviving section so the written bodies are still reachable.
+      ?? selected.find((row) => sourceRows.some((source) => source.key === row.key));
+    const fitsSeedBudget = options.fitsSeedBudget ?? (() => true);
+    const directCandidate = insertPointerLine(seedText, visibleTrimmed, pointer);
+    if (fitsSeedBudget(directCandidate)) {
+      text = directCandidate;
+      pointerLineNotice = `seed.disk.pointer_line=written tokens=${options.countTokens(pointer)}`;
+    } else {
+      let body = visibleTrimmed?.body;
+      let bodyTokens = body ? options.countTokens(body) : 0;
+      let targetTokens = bodyTokens - options.countTokens(pointer) - POINTER_LINE_MARGIN_TOKENS;
+      let added = false;
+      while (visibleTrimmed && body && targetTokens >= POINTER_LINE_SECTION_FLOOR_TOKENS) {
+        const shortened = truncateBodyToTokenCount(body, targetTokens, options.countTokens);
+        const shortenedTokens = options.countTokens(shortened);
+        if (shortenedTokens < POINTER_LINE_SECTION_FLOOR_TOKENS || shortenedTokens >= bodyTokens) break;
+        const candidate = insertPointerLine(seedText, visibleTrimmed, pointer, shortened);
+        if (fitsSeedBudget(candidate)) {
+          text = candidate;
+          pointerLineNotice = `seed.disk.pointer_line=written tokens=${options.countTokens(pointer)}`;
+          added = true;
+          break;
+        }
+        body = shortened;
+        bodyTokens = shortenedTokens;
+        targetTokens = bodyTokens - POINTER_LINE_MARGIN_TOKENS;
+      }
+      if (!added) {
+        pointerLineNotice = 'seed.disk.pointer_line=skipped reason=budget';
+        pointerSkipNotice = 'seed.disk.pointer=skipped reason=budget';
+      }
+    }
+  }
   try {
     await options.write(filePath, contents);
   } catch {
     return { text: seedText, notice: 'seed.disk=skipped reason=write_failed', tokensMoved: 0, tokensStored: 0, stubTokens: 0 };
   }
-  const tokensStored = sourceRows.reduce((total, row) => total + options.countTokens(row.body), 0);
+  if (replacements.length === 0) {
+    return {
+      text,
+      notice: `seed.disk=written mode=trimmed_copy sections=${sourceRows.length} tokens_kept=${tokensStored} path=${filename}`,
+      tokensMoved: 0,
+      tokensStored,
+      stubTokens: 0,
+      ...(pointerLineNotice ? { pointerLineNotice } : {}),
+      ...(pointerSkipNotice ? { pointerSkipNotice } : {}),
+    };
+  }
   const tokensMoved = options.countTokens(seedText) - options.countTokens(text) + stubTokens;
   return {
     text,
-    notice: `seed.disk=written sections=${sourceRows.length} tokens_moved=${tokensMoved} tokens_stored=${tokensStored} tokens_stubbed=${stubTokens} path=${filename}`,
+    notice: `seed.disk=written mode=pointer sections=${sourceRows.length} tokens_moved=${tokensMoved} tokens_stored=${tokensStored} tokens_stubbed=${stubTokens} path=${filename}`,
     tokensMoved,
     tokensStored,
     stubTokens,

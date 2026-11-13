@@ -1011,12 +1011,31 @@ function diskWriteTokens(replay) {
 
 function diskStoredTokens(replay) {
   const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
-  return notice ? Number(/\btokens_stored=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+  return notice ? Number(/\b(?:tokens_stored|tokens_kept)=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
 }
 
 function diskStubTokens(replay) {
   const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
   return notice ? Number(/\btokens_stubbed=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+}
+
+function diskSectionMode(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
+  return notice ? /\bmode=(pointer|trimmed_copy)\b/.exec(notice)?.[1] ?? 'none' : 'none';
+}
+
+function diskPointerLineTokens(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk.pointer_line=written '));
+  return notice ? Number(/\btokens=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+}
+
+function diskPointerLineStatus(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk.pointer_line='));
+  if (!notice) return { status: 'none', reason: null };
+  const written = /^seed\.disk\.pointer_line=written\b/.test(notice);
+  if (written) return { status: 'written', reason: null };
+  const reason = /\breason=([^\s]+)/.exec(notice)?.[1] ?? 'unknown';
+  return { status: 'skipped', reason };
 }
 
 const SECTION_LABELS = {
@@ -1068,12 +1087,16 @@ function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
     const tokensMoved = diskWriteTokens(on.replay);
     const tokensStored = diskStoredTokens(on.replay);
     const tokensStubbed = diskStubTokens(on.replay);
-    const seedTokensExpectedOn = Number.isFinite(seedTokensOff) ? seedTokensOff - tokensMoved + tokensStubbed : null;
+    const mode = diskSectionMode(on.replay);
+    const seedTokensAddedByPointerLine = diskPointerLineTokens(on.replay);
+    const pointerLine = diskPointerLineStatus(on.replay);
+    const seedTokensExpectedOn = Number.isFinite(seedTokensOff) ? seedTokensOff - tokensMoved + tokensStubbed + seedTokensAddedByPointerLine : null;
     const seedTokenEquationError = Number.isFinite(seedTokensExpectedOn) && Number.isFinite(seedTokensOn) ? seedTokensOn - seedTokensExpectedOn : null;
     return {
       sessionId: cut.sessionId,
       ordinal: cut.ordinal,
       type: cut.type,
+      mode,
       cutAt: cut.startedAt,
       eligible: true,
       seedTokensOff,
@@ -1081,6 +1104,9 @@ function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
       tokensMoved,
       tokensStored,
       tokensStubbed,
+      seedTokensAddedByPointerLine,
+      pointerLineStatus: pointerLine.status,
+      pointerLineSkipReason: pointerLine.reason,
       seedTokensSaved: Number.isFinite(seedTokensOff) && Number.isFinite(seedTokensOn) ? seedTokensOff - seedTokensOn : null,
       seedTokensExpectedOn,
       seedTokenEquationError,
@@ -1099,6 +1125,25 @@ function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
   const fallbackChanges = compared.filter((row) => row.fallbackOutcomeChanged);
   const written = compared.filter((row) => row.tokensStored > 0);
   const diskWriteCuts = written.length;
+  const diskModes = ['pointer', 'trimmed_copy', 'none'];
+  const diskModeSummary = Object.fromEntries(diskModes.map((mode) => {
+    const rows = compared.filter((row) => row.mode === mode);
+    const pointerLinesWritten = rows.filter((row) => row.pointerLineStatus === 'written').length;
+    const pointerLinesSkipped = rows.filter((row) => row.pointerLineStatus === 'skipped');
+    return [mode, {
+      cuts: rows.length,
+      untrimmedTokensKept: distribution(rows.map((row) => row.tokensStored)),
+      seedTokensAddedByPointerLine: distribution(rows.map((row) => row.seedTokensAddedByPointerLine)),
+      pointerLinesWritten,
+      pointerLinesSkipped: pointerLinesSkipped.length,
+      pointerLinesSkippedByReason: Object.fromEntries([...new Set(pointerLinesSkipped.map((row) => row.pointerLineSkipReason ?? 'unknown'))]
+        .map((reason) => [reason, pointerLinesSkipped.filter((row) => row.pointerLineSkipReason === reason).length])),
+      fallbackOutcomeChanges: rows.filter((row) => row.fallbackOutcomeChanged).length,
+    }];
+  }));
+  const trimmedCopyCuts = compared.filter((row) => row.mode === 'trimmed_copy');
+  const writtenPointerLines = trimmedCopyCuts.filter((row) => row.pointerLineStatus === 'written');
+  const skippedPointerLines = trimmedCopyCuts.filter((row) => row.pointerLineStatus === 'skipped');
   const values = (key) => compared.map((row) => row[key]).filter(Number.isFinite);
   const sectionMedians = Object.entries(SECTION_LABELS).map(([key, label]) => {
     const offValues = compared.map((row) => measuredSection({ sectionTokens: row.sectionTokensOff, tailTokens: row.tailTokensOff }, key));
@@ -1122,7 +1167,15 @@ function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
       selectedCuts: cuts.length,
       eligibleCuts: compared.length,
       diskWriteCuts,
+      diskModes: diskModeSummary,
       fallbackOutcomeChanges: fallbackChanges.length,
+      fallbackOutcomeChangesByMode: Object.fromEntries(diskModes.map((mode) => [mode, diskModeSummary[mode].fallbackOutcomeChanges])),
+      trimmedCopyPointerLines: {
+        written: writtenPointerLines.length,
+        skipped: skippedPointerLines.length,
+        skippedByReason: diskModeSummary.trimmed_copy.pointerLinesSkippedByReason,
+        tokenCost: distribution(writtenPointerLines.map((row) => row.seedTokensAddedByPointerLine)),
+      },
       fallbackChanges,
     },
     statistics: {
@@ -1132,6 +1185,8 @@ function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
       tokensMovedWritten: distribution(written.map((row) => row.tokensMoved)),
       tokensStored: distribution(values('tokensStored')),
       tokensStoredWritten: distribution(written.map((row) => row.tokensStored)),
+      seedTokensAddedByPointerLine: distribution(values('seedTokensAddedByPointerLine')),
+      trimmedCopyPointerLineTokenCost: distribution(writtenPointerLines.map((row) => row.seedTokensAddedByPointerLine)),
       tokensStubbed: distribution(values('tokensStubbed')),
       tokensStubbedWritten: distribution(written.map((row) => row.tokensStubbed)),
       seedTokensSaved: distribution(values('seedTokensSaved')),
@@ -1164,9 +1219,20 @@ function diskComparisonMarkdown(report) {
     'Percentiles use linear interpolation at position (n - 1) times p.',
     'Per-section sizes count the rendered heading and body. Retained-tail sizes count the serialized kept messages. Missing sections count as zero.',
     '',
-    '| Measure | n | Median | p25 | p75 | p90 |',
-    '|---|---:|---:|---:|---:|---:|',
+    '## Disk mode counts and retained untrimmed tokens',
+    '',
+    '| Mode | Cuts | Untrimmed tokens kept on disk (n / median / p25 / p75 / p90) | Seed tokens added by pointer line (n / median / p25 / p75 / p90) | Pointer lines written / skipped | Fallback outcome changes |',
+    '|---|---:|---|---|---:|---:|',
   ];
+  for (const mode of ['pointer', 'trimmed_copy', 'none']) {
+    const value = report.summary.diskModes[mode];
+    const kept = value.untrimmedTokensKept;
+    const pointer = value.seedTokensAddedByPointerLine;
+    rows.push(`| ${mode} | ${value.cuts} | ${kept.n} / ${displayValue(kept.median)} / ${displayValue(kept.p25)} / ${displayValue(kept.p75)} / ${displayValue(kept.p90)} | ${pointer.n} / ${displayValue(pointer.median)} / ${displayValue(pointer.p25)} / ${displayValue(pointer.p75)} / ${displayValue(pointer.p90)} | ${value.pointerLinesWritten} / ${value.pointerLinesSkipped} | ${value.fallbackOutcomeChanges} |`);
+  }
+  const pointerLines = report.summary.trimmedCopyPointerLines;
+  rows.push('', '## Trimmed-copy pointer lines', '', `Written: ${pointerLines.written}; skipped: ${pointerLines.skipped}${Object.entries(pointerLines.skippedByReason).map(([reason, count]) => `; ${reason}: ${count}`).join('')}.`, `Line token cost: n=${pointerLines.tokenCost.n}, median=${displayValue(pointerLines.tokenCost.median)}, p90=${displayValue(pointerLines.tokenCost.p90)}.`);
+  rows.push('', '| Measure | n | Median | p25 | p75 | p90 |', '|---|---:|---:|---:|---:|---:|');
   for (const [label, key] of [
     ['Seed tokens, option off', 'seedTokensOff'],
     ['Seed tokens, option on', 'seedTokensOn'],
@@ -1174,6 +1240,8 @@ function diskComparisonMarkdown(report) {
     ['Effective seed tokens moved on written cuts', 'tokensMovedWritten'],
     ['Source tokens stored on disk', 'tokensStored'],
     ['Source tokens stored on written cuts', 'tokensStoredWritten'],
+    ['Seed tokens added by trimmed-copy pointer lines', 'seedTokensAddedByPointerLine'],
+    ['Trimmed-copy pointer line token cost when written', 'trimmedCopyPointerLineTokenCost'],
     ['Stub body tokens in seed', 'tokensStubbed'],
     ['Stub body tokens on written cuts', 'tokensStubbedWritten'],
     ['Seed token reduction', 'seedTokensSaved'],
@@ -1190,9 +1258,9 @@ function diskComparisonMarkdown(report) {
   for (const section of report.sectionMedians) {
     rows.push(`| ${section.label} | ${section.n} | ${displayValue(section.medianOff)} | ${displayValue(section.medianOn)} | ${displayValue(section.medianDelta)} |`);
   }
-  rows.push('', '## Per-cut totals', '', '| Session | Cut | Type | Seed off | Seed on | Effective moved | Source stored | Stub tokens | Expected on | Equation error | Tail off | Tail on | Fallback off | Fallback on |', '|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|');
+  rows.push('', '## Per-cut totals', '', '| Session | Cut | Type | Mode | Seed off | Seed on | Effective moved | Source stored | Stub tokens | Pointer-line tokens | Expected on | Equation error | Tail off | Tail on | Fallback off | Fallback on |', '|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|');
   for (const cut of report.cuts) {
-    rows.push(`| ${cut.sessionId} | ${cut.ordinal} | ${cut.type} | ${displayValue(cut.seedTokensOff)} | ${displayValue(cut.seedTokensOn)} | ${displayValue(cut.tokensMoved)} | ${displayValue(cut.tokensStored)} | ${displayValue(cut.tokensStubbed)} | ${displayValue(cut.seedTokensExpectedOn)} | ${displayValue(cut.seedTokenEquationError)} | ${displayValue(cut.tailTokensOff)} | ${displayValue(cut.tailTokensOn)} | ${cut.eligible ? cut.fallbackOff : 'n/a'} | ${cut.eligible ? cut.fallbackOn : 'n/a'} |`);
+    rows.push(`| ${cut.sessionId} | ${cut.ordinal} | ${cut.type} | ${cut.mode ?? 'n/a'} | ${displayValue(cut.seedTokensOff)} | ${displayValue(cut.seedTokensOn)} | ${displayValue(cut.tokensMoved)} | ${displayValue(cut.tokensStored)} | ${displayValue(cut.tokensStubbed)} | ${displayValue(cut.seedTokensAddedByPointerLine)} | ${displayValue(cut.seedTokensExpectedOn)} | ${displayValue(cut.seedTokenEquationError)} | ${displayValue(cut.tailTokensOff)} | ${displayValue(cut.tailTokensOn)} | ${cut.eligible ? cut.fallbackOff : 'n/a'} | ${cut.eligible ? cut.fallbackOn : 'n/a'} |`);
   }
   rows.push('', '## Per-cut section token counts', '', '| Session | Cut | Type | Seed section or tail | Off tokens | On tokens | Change (on - off) |', '|---|---:|---|---|---:|---:|---:|');
   for (const cut of report.cuts.filter((row) => row.eligible)) {
