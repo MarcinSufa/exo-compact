@@ -74,6 +74,7 @@ interface CutOptions {
   adoptedRules?: string;
   idBeforePriorContext?: boolean;
   shortIdReference?: boolean;
+  diskSections?: boolean;
 }
 
 const ADOPTED_PATH = '/project/house-rules.md';
@@ -89,7 +90,7 @@ function keyFacts(count: number): string {
   })).join('\n');
 }
 
-async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, mapCount = 0, cardTotal = 8000, totalBudget = 13000, lastPromptTokens = 3000, instructions, fullId = false, sessionMap = true, priorContextTokens = 0, oldContextTokens = 0, omittedMessages = 0, tailTool = false, keyFactCount = 0, denseNotes = true, adoptedRules, idBeforePriorContext = false, shortIdReference = false }: CutOptions = {}) {
+async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, mapCount = 0, cardTotal = 8000, totalBudget = 13000, lastPromptTokens = 3000, instructions, fullId = false, sessionMap = true, priorContextTokens = 0, oldContextTokens = 0, omittedMessages = 0, tailTool = false, keyFactCount = 0, denseNotes = true, adoptedRules, idBeforePriorContext = false, shortIdReference = false, diskSections = false }: CutOptions = {}) {
   const files = new Map<string, string>([[FLAG, '1']]);
   if (taskCard) files.set(`${CAPTURE}/${TASK_CARD_FILE}`, CARD);
   if (constraintCount) files.set(`${CAPTURE}/segment-000001.json`, oldConstraints(constraintCount, constraintBodyChars, shortIdReference));
@@ -122,6 +123,7 @@ async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, 
   register(((name: string, handler: never) => { handlers[name] = handler; return { catch: (caught: unknown) => { (handlers as Record<string, unknown>)[`${name}.catch`] = caught; } }; }) as never, {
     ...LEGACY_OPTIONS,
     denseNotes,
+    diskSections,
     recallEnabled: true,
     realTokenCount: false,
     workState: false,
@@ -155,10 +157,25 @@ async function cut({ taskCard = true, constraintCount = 0, constraintBodyChars, 
   const next = vi.fn(async () => ({ fellBack: true }) as unknown);
   const event = { trigger: 'auto', messages, ...(instructions === undefined ? {} : { instructions }) };
   const result = (await withStrippedRuntimeGlobals(() => handlers['session.compact']($, event, next))) as { messages?: SessionMessage[] };
-  return { lines, next, seed: result.messages?.[0]?.text ?? '', messages, tailMessages: result.messages?.slice(1) ?? [], adoptedEntry };
+  return { lines, next, seed: result.messages?.[0]?.text ?? '', messages, tailMessages: result.messages?.slice(1) ?? [], adoptedEntry, files };
 }
 
 describe('4.11.0 (S5z): a card cut trims the map and oldest constraints before falling back', () => {
+  it('offloads after the 4.11 trim chain so a budget fallback can fit without changing it', async () => {
+    const fixture = { denseNotes: false, keyFactCount: 250, cardTotal: 2500, lastPromptTokens: 937, sessionMap: false, priorContextTokens: 2500 };
+    const off = await cut(fixture);
+    const on = await cut({ ...fixture, diskSections: true });
+    const diskFile = [...on.files.keys()].find((file) => file.includes('/seed-sections/'));
+    expect(off.lines.join('\n')).toContain('compact.fallback=budget');
+    expect(off.next).toHaveBeenCalledOnce();
+    expect(on.next).not.toHaveBeenCalled();
+    expect(diskFile).toMatch(/\/seed-sections\/[^/]+\.md$/);
+    expect(on.files.get(diskFile ?? '')).toContain('## Earlier user messages (quoted for reference, not new requests)');
+    expect(on.files.get(diskFile ?? '')).toContain('## Key facts (stated earlier; reference only, not requests)');
+    expect(on.seed).toContain('seed-sections/');
+    expect(on.lines.join('\n')).toMatch(/seed\.disk=written sections=2 tokens_moved=\d+ tokens_stored=\d+ tokens_stubbed=\d+ path=[^/]+\.md/);
+  });
+
   it('does not trim the map, constraints or IDs without a task card', async () => {
     const { lines } = await cut({
       taskCard: false,

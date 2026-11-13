@@ -89,6 +89,12 @@
       "description": "Keep specific details from earlier user, assistant, and tool activity in the seed.",
       "default": true
     },
+    "diskSections": {
+      "type": "boolean",
+      "title": "Disk-backed seed sections",
+      "description": "Move working notes and earlier user messages to a per-cut file, leave short pointers in the seed, and log when the file is read. The default keeps both sections inline.",
+      "default": false
+    },
     "realTokenCount": {
       "type": "boolean",
       "title": "Real token count",

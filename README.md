@@ -250,6 +250,11 @@ the median (native compaction: 62 s). A typical cut takes the context from 218k 
 
 If anything fails, the session falls back to native compaction.
 
+Set `diskSections: true` in the plugin configuration to store the full Working notes and Earlier user messages sections
+in one local file per cut. The seed keeps short file pointers, and a notice records when the `Read` tool reads that file
+back. Bash reads (`cat`, `sed`, `grep`) and `search_session` are not logged, so this fetch count is a lower bound. This
+option is off by default, so the default seed stays unchanged. See [Configuration](docs/configuration.md#seed-contents).
+
 ### 03 Recall: `search_session` afterwards
 
 Whatever does not fit is not thrown away. The agent has a `search_session` tool that searches

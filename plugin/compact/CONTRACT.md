@@ -1743,7 +1743,7 @@ restores the 3.14 seed layout. The plugin option defaults to `true`.
 
 `core/dense.ts` is pure and deterministic. `specificTokens` lowercases the path, identifier, flag,
 hash, and number matches in the S4o brief. `denseCandidates` walks captured `user`, `assistant_text`,
-and `tool_activity` records in order, keeps trimmed 8–400 character lines, skips chat-labeled user
+and `tool_activity` records in order, keeps trimmed 8-400 character lines, skips chat-labeled user
 records, seed sentinels, and native-summary boilerplate, and caps the pool to the newest 4000 lines.
 `selectDense` starts coverage from the tail and rendered constraints, then lazily chooses the line
 with the most uncovered specific tokens per token cost, weighted toward recent records. Ties prefer
@@ -1892,7 +1892,7 @@ URLs. URL userinfo parts are bounded to 256 characters, so every shape stays lin
 Dense notes split on every Unicode line break (`\r`, `\u2028`, `\u2029`, `\u0085`, `\v`, `\f`). A turn
 check folds look-alikes first (NFKD without combining marks and format characters, Cyrillic and Greek
 letters, colon look-alikes) and strips a time prefix, escaped `\n`, `$ ` and markdown; it drops
-`User:`, `The user:`, `User said:`, `User — ...`, `Me:` and headings named like a seed section. A
+`User:`, `The user:`, `User said:`, `User: ...`, `Me:` and headings named like a seed section. A
 fullwidth `＜` or an entity `&lt;` before a tag name is neutralized like `<`. A free-form name
 (`Alice: ...`) and the agent's own `Next step:` / `Todo:` notes are kept on purpose.
 
@@ -2788,7 +2788,7 @@ Gate test: doctor, "an install under the old plugin id stops the launch".
 `briefDigestModel` applies only with `taskCard=false`, where a cut without a card still shows the checklist. Why: with
 the card on, `cardOn` (a card exists, or the brief is the last prompt) sets the brief budget to 0, so the checklist
 never reached a seed: 0 of 29 cuts in w17 w61 (a/d/e), 0 of 210 recorded `[[exovault:s4-seed:v1]]` seeds under
-`~/.claude/projects`, and 0 Reads of a `.digest.md` file. The calls cost $0.68–0.80 per 8-task chain (w61
+`~/.claude/projects`, and 0 Reads of a `.digest.md` file. The calls cost $0.68-0.80 per 8-task chain (w61
 `.digest.cost.json`), about 40% of the plugin's +$1.85 over native. Haiku as the checklist model was measured and
 rejected: on the 7 w61a briefs it kept 65% of the briefs' exact values (backticked names, paths, quoted strings,
 numbers with units) against Sonnet's 92%, for $0.30 vs $0.68.
@@ -3633,6 +3633,35 @@ This is accepted because the option is legacy and defaults to true.
 The final `seed.budget_over` guard remains for content these steps cannot reduce, such as oversized
 `event.instructions`. On ex44, there were 59 budget fallbacks from 2026-10-26 to 2026-11-08; the first 44 had a median
 overrun of 892 tokens (range 1-2,223).
+
+### S5aa: opt-in disk-backed seed sections
+
+`diskSections` is a boolean option, default `false`, read with `optionBoolean(options, 'diskSections', false)`. With it off,
+the seed follows the existing path byte for byte. With it on, the hook first completes the normal seed render, budget
+checks, ID expansion and trim chain. It then writes the original bodies of the current working-notes section and
+earlier-user-messages section to one file per cut at `<capturePath>/seed-sections/<cut id>.md`. The id is a compact
+base-36 cut timestamp plus a per-process sequence. When `denseNotes`
+is off, the legacy key-facts section occupies that first slot. The file holds one `## <section heading>` for each non-empty
+source section; bodies include the user-history quote prefix and existing seed-section guard, without budget trimming.
+
+For each selected body still present in the normal rendered seed, a short pointer replaces only that body when the
+replacement reduces the full seed's estimated token count. The seed heading remains, and the pointer contains the full
+file path plus `Read this file.` Because replacement follows normal sizing, all other seed sections
+and the retained tail render as they do with the option off. `tokens_moved` is the effective full-seed token reduction
+plus pointer cost, measured with the cut's token counter; `tokens_stored` counts tokens in the complete source bodies
+written to disk; `tokens_stubbed` counts pointer body tokens. The tail pick, tail floor and 4.11.0 trim order are
+unchanged. A successful write logs one line per cut:
+`seed.disk=written sections=<n> tokens_moved=<n> tokens_stored=<n> tokens_stubbed=<n> path=<basename>`.
+No capture root, no movable sections, no token savings, or a rejected write leaves the original rendered bodies inline
+and logs one `seed.disk=skipped reason=<reason>` notice. A no-capture-root skip is debug-only.
+
+With the option on, `classic.PostToolUse` logs `seed.disk.fetched file=<basename>` after a `Read` whose `file_path` is inside
+this session's `seed-sections/` directory. Path checks normalize slash direction and dot segments. This logs only the
+`Read` tool. Reads through Bash (`cat`, `sed`, `grep`) and `search_session` are not logged, so the fetch count is a lower
+bound on later access. The fetch notice is best-effort; a rejected logger or filesystem lookup never escapes the hook.
+
+Gate: `disk-sections.gate.test.ts` covers the unchanged default seed, disk write and pointer, write fallback, fetch notice,
+and the budget case that checks seed savings while preserving the other rendered sections.
 
 ### 4.9.2: pinned vectors runtime and Windows pipe name
 

@@ -32,6 +32,7 @@ With `--plugin-dir` (the launcher) the plugin is keyed `exo-compact` / `exo-comp
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `denseNotes` | boolean | `true` | Keep specific details from earlier user, assistant, and tool activity in the seed. |
+| `diskSections` | boolean | `false` | Move working notes and earlier user messages to a per-cut file, leave short pointers in the seed, and log when the file is read. The default keeps both sections inline. |
 | `toolOutputNotes` | boolean | `true` | Keep safe lines from Bash results in dense working notes. |
 | `workState` | boolean | `true` | Keep the session directory, Git state, tasks, and background work in the seed. |
 | `workStateProbe` | boolean | `true` | Check Git status and worktrees at compaction time. |

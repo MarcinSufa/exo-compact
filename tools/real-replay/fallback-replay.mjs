@@ -226,7 +226,7 @@ function sectionSizes(noticeLines) {
 
 function sectionNotices(noticeLines) {
   return (noticeLines ?? []).map((entry) => typeof entry === 'string' ? entry : String(entry?.body ?? ''))
-    .filter((body) => /^seed\.(?:budget_|work_state|session_map|task_brief|task_card|since_card|recipes|dense|constraints|adopted|facts|key_facts|current_values|ids)/.test(body));
+    .filter((body) => !body.startsWith('seed.disk_replay_sections=') && /^seed\.(?:disk|budget_|work_state|session_map|task_brief|task_card|since_card|recipes|dense|constraints|adopted|facts|key_facts|current_values|ids)/.test(body));
 }
 
 /** File rows whose snapshot timestamp (or mtime fallback) is at or before the cut. */
@@ -588,7 +588,7 @@ export function matchSessionBoundaries(session, cuts, boundaries) {
   return matchBoundaries(cuts, boundaries, session.allCuts ?? session.cuts ?? cuts);
 }
 
-export function discoverData(captureRoot, projectsRoot, noticesBefore) {
+export function discoverData(captureRoot, projectsRoot, noticesBefore, { includeNoFallbackSessions = false } = {}) {
   const transcripts = collectTranscriptFiles(projectsRoot);
   const sessions = [];
   let dirs = [];
@@ -601,7 +601,7 @@ export function discoverData(captureRoot, projectsRoot, noticesBefore) {
     const parsedCuts = parseNoticeCuts(notices);
     const cuts = Number.isFinite(noticesBefore) ? parsedCuts.filter((cut) => Date.parse(cut.completedAt) <= noticesBefore) : parsedCuts;
     const fallbacks = cuts.filter((cut) => cut.originalFallback === 'budget');
-    if (!fallbacks.length) continue;
+    if (!fallbacks.length && !includeNoFallbackSessions) continue;
     sessions.push({ sessionId, sessionDir, transcriptPath: transcripts.get(sessionId), cuts, allCuts: parsedCuts, fallbacks, captureFiles: walkFiles(sessionDir) });
   }
   return sessions;
@@ -719,6 +719,26 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function percentile(values, fraction) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * fraction;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+function distribution(values) {
+  return {
+    n: values.length,
+    median: median(values),
+    p25: percentile(values, 0.25),
+    p75: percentile(values, 0.75),
+    p90: percentile(values, 0.9),
+  };
+}
+
 function ratioRange(values) {
   return values.length ? { min: Math.min(...values), max: Math.max(...values) } : null;
 }
@@ -746,6 +766,16 @@ export function replaySeedMetrics({ result, logs, realTokenCount, budgetCore, fe
   const taskCard = noticeNumber(logs, /^seed\.task_card=(\d+)/);
   const briefLastPrompt = noticeNumber(logs, /\bseed\.brief_last_prompt=(\d+)/);
   const cardOn = taskCard === 1 || briefLastPrompt === 1;
+  const sectionLine = logs.find((line) => line.startsWith('seed.disk_replay_sections='));
+  let sectionTokens = {};
+  let tailTokens = null;
+  if (sectionLine) {
+    const match = /^seed\.disk_replay_sections=(\{.*\}) tail=(\d+)$/.exec(sectionLine);
+    if (match) {
+      try { sectionTokens = JSON.parse(match[1]); } catch { sectionTokens = {}; }
+      tailTokens = Number(match[2]);
+    }
+  }
   let seedBudget = over?.[1] ?? null;
   if (seedBudget === null && Number.isFinite(baseTotal) && Number.isFinite(baseSeed) && Number.isFinite(baseTail) && Number.isFinite(seedTokens) && Number.isFinite(tokensAfter)) {
     const tailTokens = Math.max(0, tokensAfter - seedTokens);
@@ -759,6 +789,8 @@ export function replaySeedMetrics({ result, logs, realTokenCount, budgetCore, fe
     tokensAfter,
     seedBudget,
     seedMargin: Number.isFinite(seedBudget) && Number.isFinite(seedTokens) ? seedBudget - seedTokens : null,
+    sectionTokens,
+    tailTokens,
   };
 }
 
@@ -955,15 +987,222 @@ export async function replayCut({ plugin, register, extractor, budgetCore, sessi
 }
 
 function parseArgs(argv) {
-  const args = { plugin: path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../plugin/compact'), out: undefined, noticesBefore: undefined };
+  const args = { plugin: path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../plugin/compact'), out: undefined, noticesBefore: undefined, diskSectionsCompare: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--plugin') args.plugin = path.resolve(argv[++i]);
     else if (argv[i] === '--out') args.out = path.resolve(argv[++i]);
     else if (argv[i] === '--notices-before') args.noticesBefore = argv[++i];
+    else if (argv[i] === '--disk-sections-compare') args.diskSectionsCompare = true;
     else if (argv[i] === '--help') args.help = true;
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   return args;
+}
+
+function attemptedSeedTokens(replay) {
+  if (Number.isFinite(replay?.seedTokens)) return replay.seedTokens;
+  return budgetParts(replay?.budgetOver)?.[0] ?? null;
+}
+
+function diskWriteTokens(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
+  return notice ? Number(/\btokens_moved=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+}
+
+function diskStoredTokens(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
+  return notice ? Number(/\btokens_stored=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+}
+
+function diskStubTokens(replay) {
+  const notice = replay?.sectionNotices?.find((line) => line.startsWith('seed.disk=written '));
+  return notice ? Number(/\btokens_stubbed=(\d+)/.exec(notice)?.[1] ?? 0) : 0;
+}
+
+const SECTION_LABELS = {
+  compactionPressure: 'Compaction pressure',
+  taskCard: 'Task card',
+  sinceCard: 'Since the card',
+  taskBriefs: 'Task brief',
+  currentValues: 'Current values',
+  workState: 'Work state',
+  recipes: 'Recipes',
+  sessionMap: 'Session map',
+  constraints: 'Constraints',
+  denseNotes: 'Working notes',
+  keyFacts: 'Key facts',
+  transcriptPointer: 'Transcript',
+  contract: 'Contract',
+  todo: 'Todo',
+  userHistory: 'Earlier user messages',
+  values: 'Values',
+  selectedReasoning: 'Earlier assistant notes',
+  gatesAndErrors: 'Gates and errors',
+  filePointers: 'File pointers',
+  nextStep: 'Next step',
+  ids: 'IDs',
+  tail: 'Retained tail',
+};
+
+function measuredSection(replay, key) {
+  const value = key === 'tail' ? replay?.tailTokens : replay?.sectionTokens?.[key];
+  return Number.isFinite(value) ? value : 0;
+}
+
+function diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs }) {
+  const cuts = pairs.map(({ cut, off, on }) => {
+    if (!off.eligible || !on.eligible) {
+      return {
+        sessionId: cut.sessionId,
+        ordinal: cut.ordinal,
+        type: cut.type,
+        cutAt: cut.startedAt,
+        eligible: false,
+        reason: off.reason ?? on.reason ?? 'one replay arm was ineligible',
+      };
+    }
+    const seedTokensOff = attemptedSeedTokens(off.replay);
+    const seedTokensOn = attemptedSeedTokens(on.replay);
+    const fallbackOff = off.replay.fellBack;
+    const fallbackOn = on.replay.fellBack;
+    const tokensMoved = diskWriteTokens(on.replay);
+    const tokensStored = diskStoredTokens(on.replay);
+    const tokensStubbed = diskStubTokens(on.replay);
+    const seedTokensExpectedOn = Number.isFinite(seedTokensOff) ? seedTokensOff - tokensMoved + tokensStubbed : null;
+    const seedTokenEquationError = Number.isFinite(seedTokensExpectedOn) && Number.isFinite(seedTokensOn) ? seedTokensOn - seedTokensExpectedOn : null;
+    return {
+      sessionId: cut.sessionId,
+      ordinal: cut.ordinal,
+      type: cut.type,
+      cutAt: cut.startedAt,
+      eligible: true,
+      seedTokensOff,
+      seedTokensOn,
+      tokensMoved,
+      tokensStored,
+      tokensStubbed,
+      seedTokensSaved: Number.isFinite(seedTokensOff) && Number.isFinite(seedTokensOn) ? seedTokensOff - seedTokensOn : null,
+      seedTokensExpectedOn,
+      seedTokenEquationError,
+      sectionTokensOff: off.replay.sectionTokens ?? {},
+      sectionTokensOn: on.replay.sectionTokens ?? {},
+      tailTokensOff: off.replay.tailTokens,
+      tailTokensOn: on.replay.tailTokens,
+      fallbackOff,
+      fallbackOn,
+      fallbackReasonOff: off.replay.reason,
+      fallbackReasonOn: on.replay.reason,
+      fallbackOutcomeChanged: fallbackOff !== fallbackOn,
+    };
+  });
+  const compared = cuts.filter((row) => row.eligible);
+  const fallbackChanges = compared.filter((row) => row.fallbackOutcomeChanged);
+  const written = compared.filter((row) => row.tokensStored > 0);
+  const diskWriteCuts = written.length;
+  const values = (key) => compared.map((row) => row[key]).filter(Number.isFinite);
+  const sectionMedians = Object.entries(SECTION_LABELS).map(([key, label]) => {
+    const offValues = compared.map((row) => measuredSection({ sectionTokens: row.sectionTokensOff, tailTokens: row.tailTokensOff }, key));
+    const onValues = compared.map((row) => measuredSection({ sectionTokens: row.sectionTokensOn, tailTokens: row.tailTokensOn }, key));
+    const deltas = onValues.map((value, index) => value - offValues[index]);
+    return { key, label, n: compared.length, medianOff: median(offValues), medianOn: median(onValues), medianDelta: median(deltas) };
+  });
+  const report = {
+    pluginDir: path.resolve(plugin),
+    pluginVersion: JSON.parse(fs.readFileSync(path.join(plugin, '.claude-plugin/plugin.json'), 'utf8')).version,
+    runAt: new Date().toISOString(),
+    noticesBefore: noticesBefore ?? null,
+    settingsSource: settingsFile,
+    method: {
+      cutSelection: 'Every captured compact cut in the selected sessions.',
+      replay: 'Each cut is replayed twice from the same captured snapshot. diskSections differs between arms; the same debug-only section-size diagnostic is enabled for both. Writes stay in the in-memory replay overlay and HTTP is disabled.',
+      tokens: 'Uses each cut token counter. On budget fallback, the attempted seed count comes from seed.budget_over; otherwise it comes from the returned seed. tokens_moved is the effective seed-token saving plus pointer cost; tokens_stored counts source bodies written. Section counts include each rendered heading and body; retained-tail counts use serialized messages. Missing sections count as zero.',
+      quantiles: 'Percentiles use linear interpolation at position (n - 1) times p.',
+    },
+    summary: {
+      selectedCuts: cuts.length,
+      eligibleCuts: compared.length,
+      diskWriteCuts,
+      fallbackOutcomeChanges: fallbackChanges.length,
+      fallbackChanges,
+    },
+    statistics: {
+      seedTokensOff: distribution(values('seedTokensOff')),
+      seedTokensOn: distribution(values('seedTokensOn')),
+      tokensMoved: distribution(values('tokensMoved')),
+      tokensMovedWritten: distribution(written.map((row) => row.tokensMoved)),
+      tokensStored: distribution(values('tokensStored')),
+      tokensStoredWritten: distribution(written.map((row) => row.tokensStored)),
+      tokensStubbed: distribution(values('tokensStubbed')),
+      tokensStubbedWritten: distribution(written.map((row) => row.tokensStubbed)),
+      seedTokensSaved: distribution(values('seedTokensSaved')),
+      seedTokensSavedWritten: distribution(written.map((row) => row.seedTokensSaved)),
+      seedTokensExpectedOn: distribution(values('seedTokensExpectedOn')),
+      seedTokenEquationError: distribution(values('seedTokenEquationError')),
+      tailTokensOff: distribution(compared.map((row) => row.tailTokensOff).filter(Number.isFinite)),
+      tailTokensOn: distribution(compared.map((row) => row.tailTokensOn).filter(Number.isFinite)),
+    },
+    sectionMedians,
+    cuts,
+  };
+  return report;
+}
+
+function displayValue(value) {
+  return Number.isFinite(value) ? String(Math.round(value * 10) / 10) : 'n/a';
+}
+
+function diskComparisonMarkdown(report) {
+  const rows = [
+    '# Disk-backed seed sections replay',
+    '',
+    `Run: ${report.runAt}`,
+    `Plugin version: ${report.pluginVersion}`,
+    `Selected cuts: ${report.summary.selectedCuts}; eligible paired cuts: ${report.summary.eligibleCuts}`,
+    `Cuts with a disk write: ${report.summary.diskWriteCuts}`,
+    `Cuts with a changed fallback outcome: ${report.summary.fallbackOutcomeChanges}`,
+    '',
+    'Percentiles use linear interpolation at position (n - 1) times p.',
+    'Per-section sizes count the rendered heading and body. Retained-tail sizes count the serialized kept messages. Missing sections count as zero.',
+    '',
+    '| Measure | n | Median | p25 | p75 | p90 |',
+    '|---|---:|---:|---:|---:|---:|',
+  ];
+  for (const [label, key] of [
+    ['Seed tokens, option off', 'seedTokensOff'],
+    ['Seed tokens, option on', 'seedTokensOn'],
+    ['Effective seed tokens moved', 'tokensMoved'],
+    ['Effective seed tokens moved on written cuts', 'tokensMovedWritten'],
+    ['Source tokens stored on disk', 'tokensStored'],
+    ['Source tokens stored on written cuts', 'tokensStoredWritten'],
+    ['Stub body tokens in seed', 'tokensStubbed'],
+    ['Stub body tokens on written cuts', 'tokensStubbedWritten'],
+    ['Seed token reduction', 'seedTokensSaved'],
+    ['Seed token reduction on written cuts', 'seedTokensSavedWritten'],
+    ['Expected seed size (off - moved + stub)', 'seedTokensExpectedOn'],
+    ['Equation error (actual on - expected)', 'seedTokenEquationError'],
+    ['Retained tail, option off', 'tailTokensOff'],
+    ['Retained tail, option on', 'tailTokensOn'],
+  ]) {
+    const value = report.statistics[key];
+    rows.push(`| ${label} | ${value.n} | ${displayValue(value.median)} | ${displayValue(value.p25)} | ${displayValue(value.p75)} | ${displayValue(value.p90)} |`);
+  }
+  rows.push('', '## Per-section median token counts', '', '| Seed section or tail | n | Off median | On median | Median change (on - off) |', '|---|---:|---:|---:|---:|');
+  for (const section of report.sectionMedians) {
+    rows.push(`| ${section.label} | ${section.n} | ${displayValue(section.medianOff)} | ${displayValue(section.medianOn)} | ${displayValue(section.medianDelta)} |`);
+  }
+  rows.push('', '## Per-cut totals', '', '| Session | Cut | Type | Seed off | Seed on | Effective moved | Source stored | Stub tokens | Expected on | Equation error | Tail off | Tail on | Fallback off | Fallback on |', '|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|');
+  for (const cut of report.cuts) {
+    rows.push(`| ${cut.sessionId} | ${cut.ordinal} | ${cut.type} | ${displayValue(cut.seedTokensOff)} | ${displayValue(cut.seedTokensOn)} | ${displayValue(cut.tokensMoved)} | ${displayValue(cut.tokensStored)} | ${displayValue(cut.tokensStubbed)} | ${displayValue(cut.seedTokensExpectedOn)} | ${displayValue(cut.seedTokenEquationError)} | ${displayValue(cut.tailTokensOff)} | ${displayValue(cut.tailTokensOn)} | ${cut.eligible ? cut.fallbackOff : 'n/a'} | ${cut.eligible ? cut.fallbackOn : 'n/a'} |`);
+  }
+  rows.push('', '## Per-cut section token counts', '', '| Session | Cut | Type | Seed section or tail | Off tokens | On tokens | Change (on - off) |', '|---|---:|---|---|---:|---:|---:|');
+  for (const cut of report.cuts.filter((row) => row.eligible)) {
+    for (const section of report.sectionMedians) {
+      const off = measuredSection({ sectionTokens: cut.sectionTokensOff, tailTokens: cut.tailTokensOff }, section.key);
+      const on = measuredSection({ sectionTokens: cut.sectionTokensOn, tailTokens: cut.tailTokensOn }, section.key);
+      rows.push(`| ${cut.sessionId} | ${cut.ordinal} | ${cut.type} | ${section.label} | ${displayValue(off)} | ${displayValue(on)} | ${displayValue(on - off)} |`);
+    }
+  }
+  return `${rows.join('\n')}\n`;
 }
 
 function shortTable(rows) {
@@ -980,18 +1219,24 @@ function shortTable(rows) {
   return out.join('\n');
 }
 
-export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, projectsRoot = PROJECTS_ROOT, settingsFile = path.join(HOME, '.claude/settings.json'), noticesBefore }) {
+export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, projectsRoot = PROJECTS_ROOT, settingsFile = path.join(HOME, '.claude/settings.json'), noticesBefore, diskSectionsCompare = false }) {
   const plugin = path.resolve(pluginDir);
   const options = localOptions(plugin, settingsFile);
   const { register, extractor, budgetCore } = await loadPlugin(plugin);
   const cutoff = noticesBefore === undefined ? undefined : Date.parse(noticesBefore);
   if (cutoff !== undefined && !Number.isFinite(cutoff)) throw new Error(`Invalid --notices-before timestamp: ${noticesBefore}`);
-  const sessions = discoverData(captureRoot, projectsRoot, cutoff);
+  const sessions = discoverData(captureRoot, projectsRoot, cutoff, { includeNoFallbackSessions: diskSectionsCompare });
   const results = [];
+  const comparisonPairs = [];
   for (const session of sessions) {
-    const selected = new Set([...session.fallbacks, ...controlsBeforeFallbacks(session.cuts)]);
+    const selected = new Set(diskSectionsCompare ? session.cuts : [...session.fallbacks, ...controlsBeforeFallbacks(session.cuts)]);
     if (!session.transcriptPath) {
-      for (const cut of selected) results.push({ sessionId: session.sessionId, ordinal: cut.ordinal, type: cut.originalFallback === 'budget' ? 'fallback' : 'control', eligible: false, reason: 'transcript missing' });
+      for (const cut of selected) {
+        cut.type = cut.originalFallback === 'budget' ? 'fallback' : 'control';
+        const ineligible = { sessionId: session.sessionId, ordinal: cut.ordinal, type: cut.type, eligible: false, reason: 'transcript missing' };
+        if (diskSectionsCompare) comparisonPairs.push({ cut: { ...cut, sessionId: session.sessionId }, off: ineligible, on: ineligible });
+        else results.push(ineligible);
+      }
       continue;
     }
     const transcript = await readJsonl(session.transcriptPath);
@@ -1000,9 +1245,18 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
     const byCut = matchSessionBoundaries(session, [...selected], boundaries);
     for (const cut of [...selected].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))) {
       cut.type = cut.originalFallback === 'budget' ? 'fallback' : 'control';
-      results.push(await replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary: byCut.get(cut), options }));
+      if (diskSectionsCompare) {
+        const boundary = byCut.get(cut);
+        const replayOptions = { ...options, diskSectionsReplayDiagnostics: true };
+        const off = await replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary, options: { ...replayOptions, diskSections: false } });
+        const on = await replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary, options: { ...replayOptions, diskSections: true } });
+        comparisonPairs.push({ cut: { ...cut, sessionId: session.sessionId }, off, on });
+      } else {
+        results.push(await replayCut({ plugin, register, extractor, budgetCore, session, cut, boundary: byCut.get(cut), options }));
+      }
     }
   }
+  if (diskSectionsCompare) return diskComparisonReport({ plugin, settingsFile, noticesBefore, pairs: comparisonPairs });
   const sessionsSummary = sessions.map((session) => {
     const rows = results.filter((row) => row.sessionId === session.sessionId);
     const eligible = rows.filter((row) => row.eligible);
@@ -1126,13 +1380,26 @@ export async function runReplay({ pluginDir, captureRoot = CAPTURE_ROOT, project
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    process.stdout.write('Usage: node --experimental-strip-types tools/real-replay/fallback-replay.mjs [--plugin <plugin/compact>] [--notices-before <ISO timestamp>] [--out <summary.json>]\n');
+    process.stdout.write('Usage: node --experimental-strip-types tools/real-replay/fallback-replay.mjs [--plugin <plugin/compact>] [--notices-before <ISO timestamp>] [--disk-sections-compare] [--out <summary.json>]\n');
     return;
   }
-  const report = await runReplay({ pluginDir: args.plugin, noticesBefore: args.noticesBefore });
+  const report = await runReplay({ pluginDir: args.plugin, noticesBefore: args.noticesBefore, diskSectionsCompare: args.diskSectionsCompare });
   if (args.out) {
     fs.mkdirSync(path.dirname(args.out), { recursive: true });
     fs.writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`);
+  }
+  if (args.diskSectionsCompare) {
+    const changed = report.summary.fallbackOutcomeChanges;
+    process.stdout.write(`Compared ${report.summary.eligibleCuts}/${report.summary.selectedCuts} cuts. Fallback outcomes changed on ${changed} cuts.\n`);
+    for (const [name, value] of Object.entries(report.statistics)) {
+      process.stdout.write(`${name}: n=${value.n} median=${displayValue(value.median)} p25=${displayValue(value.p25)} p75=${displayValue(value.p75)} p90=${displayValue(value.p90)}\n`);
+    }
+    if (args.out) {
+      const markdownPath = args.out.replace(/\.json$/i, '') + '.md';
+      fs.writeFileSync(markdownPath, diskComparisonMarkdown(report));
+      process.stdout.write(`JSON: ${args.out}\nMarkdown: ${markdownPath}\n`);
+    }
+    return;
   }
   process.stdout.write(`${report.table}\n`);
   process.stdout.write(`Fidelity: ${report.fidelity.fallbacks.reproducedBudget}/${report.fidelity.fallbacks.expected} fallbacks; ${report.fidelity.controls.reproducedNoFallback}/${report.fidelity.controls.expected} controls.\n`);

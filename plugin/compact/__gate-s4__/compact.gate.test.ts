@@ -1092,6 +1092,7 @@ it('plugin manifest declares each compact option with the matching option type',
     retentionDays: 'number',
     contract: 'string',
     denseNotes: 'boolean',
+    diskSections: 'boolean',
     workState: 'boolean',
     currentValues: 'boolean',
     sessionMap: 'boolean',
@@ -1124,6 +1125,7 @@ it('plugin manifest declares each compact option with the matching option type',
   for (const name of readNames) expect(manifest.userConfig?.[name]?.type, `${name} must be declared with type ${types[name]}`).toBe(types[name]);
   expect(manifest.userConfig?.recallEnabled?.default).toBe(true); // 4.8.0: a native install needs no userConfig step
   expect(manifest.userConfig?.denseNotes?.default).toBe(true);
+  expect(manifest.userConfig?.diskSections?.default).toBe(false);
   expect(manifest.userConfig?.toolOutputNotes?.default).toBe(true);
   expect(manifest.userConfig?.workState?.default).toBe(true);
   expect(manifest.userConfig?.workStateProbe?.default).toBe(true);

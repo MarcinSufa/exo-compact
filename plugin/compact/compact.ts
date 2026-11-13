@@ -30,6 +30,7 @@ import { capturePath, ensureCaptureGitignore } from './host/capture-path.js';
 import { findCaptureRoot, usableRoot } from './host/capture-flag.js';
 import type { FlagHost } from './host/capture-flag.js';
 import { captureBeforeNext } from './host/capture-order.js';
+import { diskBackRenderedSeedSections, isSeedSectionFilePath, seedSectionTokenSizes } from './host/seed-sections.js';
 import { getJevEndpoint, makeJevAsk, parseDenseJevResponse, parseJevResponse } from './host/jev-client.js';
 import { sha256 } from './host/sha256.js';
 import { forkReply, type ForkReply, CARD_CUT_SHARE, CARD_TASK_SHARE, CARD_TOTAL_BUDGET_TOKENS, cardBudgets, stretchForTail, TASK_CARD_FILE, TASK_CARD_MAX_TOKENS, TASK_CARD_STATE_FILE, TASK_CARD_BRIEF_FILE, TASK_CARD_HORIZON_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardCheckReason, renderCardPrompt, renderCardSection } from './core/task-card.js';
@@ -46,6 +47,7 @@ import { denseCandidates, denseJevCandidates, renderDense, selectDense } from '.
 import { buildDenseJevRequests, denseJevQuery, parseDenseJevAnswers } from './core/dense-jev.js';
 import { foldWorkState, parseTaskNotifications, renderWorkState, validWorkEvent } from './core/work-state.js';
 import type { WorkStateProbe } from './core/work-state.js';
+
 import { runPreflight } from './host/preflight.js';
 import { runAutoCompact } from './host/auto-compact.js';
 import { trustedPluginRoot } from './host/plugin-root.js';
@@ -456,6 +458,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try { $.ui.log(`hook.caught=prompt.submit kind=${next.error.kind}`, { to: 'debug' }); } catch { /* debug logging cannot block the prompt */ }
     return next(input);
   });
+  let diskSeedCutSequence = 0;
   on('session.compact', async ($, input, next) => {
     const homeDir = () => resolveHomeDir({ home: () => $.env.get('HOME'), userProfile: () => $.env.get('USERPROFILE'), homeDrive: () => $.env.get('HOMEDRIVE'), homePath: () => $.env.get('HOMEPATH') });
     const secureRoot = async (root: string) => captureGuard.secure({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)) }, root, capturePath(String(await $.session.id()), root));
@@ -486,7 +489,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // draws on no surface, so scripted runs (task runners, A/B arms) keep native compaction. The VS Code
       // and Cursor extension attaches no surface either but is attended (host/notices.ts, attendedSession).
       const captureRoot = await findCaptureRoot(flagHost);
-      if (captureRoot === null) { notice.debug('compact.fallback=not_enabled origin=compact'); return fallback(); }
+      if (captureRoot === null) {
+        if (optionBoolean(options, 'diskSections', false)) {
+          notice.debug('seed.disk=skipped reason=no_capture_root');
+        }
+        notice.debug('compact.fallback=not_enabled origin=compact');
+        return fallback();
+      }
       if (interactiveOnly && !(await attendedSession({ surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD') }))) {
         notice(`compact.fallback=interactive_only origin=compact entrypoint=${(await $.env.get('CLAUDE_CODE_ENTRYPOINT')) || 'unset'}`);
         return fallback();
@@ -525,6 +534,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const recallEnabled = optionBoolean(options, 'recallEnabled', true);
       const recallVectorsEnabled = optionBoolean(options, 'recallVectors', true);
       const denseNotesEnabled = optionBoolean(options, 'denseNotes', true);
+      const diskSectionsEnabled = optionBoolean(options, 'diskSections', false);
       const workStateEnabled = optionBoolean(options, 'workState', true);
       const toolOutputNotesEnabled = optionBoolean(options, 'toolOutputNotes', true);
       const baseDir = capturePath(sessionId, captureRoot);
@@ -1281,6 +1291,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           }
           let seedSections: SeedSections = { constraints: constraintsBody, ...(taskCardBody ? { taskCard: withCardAge(taskCardBody) } : {}), ...(sinceCardBody ? { sinceCard: sinceCardBody } : {}), ...(taskBriefsBody ? { taskBriefs: taskBriefsBody } : {}), ...(workStateBody ? { workState: workStateBody } : {}), ...(sessionMapBody ? { sessionMap: sessionMapBody } : {}), ...(currentValuesBody ? { currentValues: currentValuesBody } : {}), ...(denseNotesEnabled ? { denseNotes: denseBody } : { keyFacts: keyFactsBody }), compactionPressure, contract: String(options.contract ?? ''), todo: todos, ...historyForSeed(userHistory), values, selectedReasoning: denseNotesEnabled ? '' : selectedReasoning, gatesAndErrors: renderGatesAndErrors([...latest.values()]), filePointers: [...[...latest.values()].filter((record) => record.kind === 'file').map((record) => JSON.stringify(record.body)), ...collectFilePointers(event.messages as unknown as SessionMessage[])].join('\n'), transcriptPointer, ...(event.instructions !== undefined ? { compactInstructions: event.instructions } : {}) };
           if (recipesBody) seedSections = { ...seedSections, recipes: recipesBody };
+          const diskSeedSourceSections = seedSections;
           let rendered = renderSeed(seedSections, tail.omittedCount, seedBudgetTokens, countTokens);
           // 3.32.1 (CONTRACT S4zf): never-reduced sections can sum past the budget (t3: dense notes plus a full brief
           // checklist), which threw `budget` and handed 3 of 7 cuts to native compaction. The brief shrinks to fit;
@@ -1433,6 +1444,29 @@ export const register: Register = (on: On, options: PluginOptions) => {
               rendered = withKeptIds;
               notice(`seed.ids_expanded=${keptLines.length}`);
             }
+          }
+          if (diskSectionsEnabled) {
+            const cutIdentifier = Number.isFinite(cutStartedAt) ? Math.trunc(cutStartedAt).toString(36) : '0';
+            const filename = `${cutIdentifier}-${(++diskSeedCutSequence).toString(36)}.md`;
+            try {
+              const diskResult = await diskBackRenderedSeedSections(rendered.message.text, diskSeedSourceSections, {
+                directory: captureRoot === null ? null : baseDir,
+                filename,
+                countTokens,
+                write: (path, text) => $.fs.write(path, text),
+              });
+              if (diskResult.notice === 'seed.disk=skipped reason=no_capture_root') notice.debug(diskResult.notice);
+              else notice(diskResult.notice);
+              if (diskResult.notice.startsWith('seed.disk=written ')) {
+                const text = diskResult.text;
+                rendered = { ...rendered, message: { ...rendered.message, text }, tokens: countTokens(text) };
+              }
+            } catch {
+              try { notice('seed.disk=skipped reason=write_failed'); } catch { /* notice output cannot stop this cut */ }
+            }
+          }
+          if ((options as Record<string, unknown>).diskSectionsReplayDiagnostics === true) {
+            notice.debug(`seed.disk_replay_sections=${JSON.stringify(seedSectionTokenSizes(rendered.message.text, countTokens))} tail=${tailTokensForBudget}`);
           }
           const messages = [rendered.message, ...tail.messages];
           const tokensAfter = serializedTokens(messages, countTokens);
@@ -1649,6 +1683,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const secureRoot = async (root: string) => captureGuard.secure({ pluginRoot: () => trustedPluginRoot(() => $.plugin.root, optionString(options, 'recallPluginRoot', '')), run: nodeRunner((argv: string[], init: NodeRunInit) => $.process.run(argv, init), nodePathOption, (path: string) => $.fs.exists(path)) }, root, capturePath(String(await $.session.id()), root));
     const notice = noticeLog({ emit: (...args: [string, { to: 'debug' }?]) => $.ui.log(...args), surfaces: () => $.session.surfaces(), entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'), childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'), briefChild: () => $.env.get('EXOVAULT_BRIEF_CHILD'), logFile: async () => { const noticeRoot = await findCaptureRoot({ cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot }); return noticeRoot === null ? undefined : `${capturePath(String(await $.session.id()), noticeRoot)}/notices.log`; }, read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), now: () => $.clock.now() });
     const below = await next(input);
+    if (optionBoolean(options, 'diskSections', false) && input.tool_name === 'Read') {
+      try {
+        const filePath = (input.tool_input as { file_path?: unknown } | undefined)?.file_path;
+        if (typeof filePath === 'string') {
+          const flagHost = { cwd: () => $.session.cwd(), exists: (path: string) => $.fs.exists(path), root: () => $.session.root(), home: homeDir, inert: () => preflight.inert, secure: secureRoot };
+          const captureRoot = await findCaptureRoot(flagHost);
+          if (captureRoot !== null) {
+            const sessionDir = capturePath(String(await $.session.id()), captureRoot);
+            const seedDirectory = `${sessionDir}/seed-sections`;
+            if (isSeedSectionFilePath(filePath, seedDirectory)) {
+              const basename = filePath.replace(/\\/g, '/').split('/').at(-1);
+              if (basename) try { notice(`seed.disk.fetched file=${basename}`); } catch { /* notice output cannot reject PostToolUse */ }
+            }
+          }
+        }
+      } catch { /* fetch logging is best-effort and cannot reject the tool hook */ }
+    }
     if (optionBoolean(options, 'taskCard', true) && !(input as { agent_id?: string }).agent_id) {
       void refreshTaskCard({ cwd: () => $.session.cwd(), root: () => $.session.root(), id: () => $.session.id(), exists: (path: string) => $.fs.exists(path), read: (path: string) => $.fs.read(path), write: (path: string, text: string) => $.fs.write(path, text), home: homeDir, inert: () => preflight.inert, secure: secureRoot, usage: async (withWindow: boolean) => { const usage = await $.session.usage(withWindow ? { breakdown: 'summary' } : undefined); return { tokens: usage.context.tokens, window: usage.context.breakdown?.rawMaxTokens ?? usage.context.window }; }, fork: async (prompt: string) => forkReply(await $.model.fork({ prompt })), horizon: async () => (input as { tool_use_id?: string }).tool_use_id || undefined, late: optionBoolean(options, 'lateCardRefresh', false) ? { messages: async () => await $.session.messages() as unknown as SessionMessage[] } : undefined, now: async () => Number(await $.clock.now()), log: (line: string) => notice(line) });
     }

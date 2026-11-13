@@ -192,6 +192,29 @@ test('a notices-before selection still caps its last cut at the next cut in the 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('disk section comparison includes captured sessions without budget fallbacks', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fallback-replay-disk-sessions-'));
+  const captureRoot = path.join(dir, 'capture');
+  const projectsRoot = path.join(dir, 'projects');
+  const sessionId = 'control-only-session';
+  const sessionDir = path.join(captureRoot, sessionId);
+  const projectDir = path.join(projectsRoot, 'fixture-project');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionDir, 'notices.log'), [
+    '2026-11-05T12:00:00.000Z compact.sizeBefore=10000',
+    '2026-11-05T12:00:01.000Z compacted ok',
+  ].join('\n'));
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), '');
+  try {
+    assert.equal(discoverData(captureRoot, projectsRoot).length, 0);
+    const [session] = discoverData(captureRoot, projectsRoot, undefined, { includeNoFallbackSessions: true });
+    assert.equal(session.cuts.length, 1);
+    assert.equal(session.fallbacks.length, 0);
+    assert.equal(session.transcriptPath, path.join(projectDir, `${sessionId}.jsonl`));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('transcript messages after the target compact boundary are excluded', () => {
   const events = [
     { type: 'user', message: { content: 'old summary' } },
@@ -394,7 +417,7 @@ test('replay seed size and margin use the cut token counter and handler result',
       serializedTokens: (messages, countTokens) => messages.reduce((sum, message) => sum + countTokens(message.text), 0),
     },
   });
-  assert.deepEqual(metrics, { seedTokens: 3, tokensAfter: 10, seedBudget: 13, seedMargin: 10 });
+  assert.deepEqual(metrics, { seedTokens: 3, tokensAfter: 10, seedBudget: 13, seedMargin: 10, sectionTokens: {}, tailTokens: null });
 });
 
 test('card seed allowance reserves its effective tail budget when the returned tail exceeds it', () => {
