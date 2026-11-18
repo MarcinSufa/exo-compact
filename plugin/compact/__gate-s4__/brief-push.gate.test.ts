@@ -215,12 +215,31 @@ describe('3.40.0 (S4zl) PreToolUse and prompt hooks', () => {
     }
   });
 
+  it('fail-open: a long prompt with no origin, an unknown source or source user is a new brief and turns the push off', async () => {
+    const brief = `Task 3 of 6.\n${'x '.repeat(1500)}`;
+    for (const input of [{ text: brief }, { text: brief, source: 'future_kind' }, { text: brief, source: 'user' }, { text: brief, origin: { kind: 'bridge' } }]) {
+      const h = host(BRIEF_PUSH_ARMED);
+      let passed: unknown;
+      const result = await (await hooks({ recallEnabled: true }))['prompt.submit']!(h, input as never, async (e) => { passed = e; return e; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(passed).toBe(input);
+      expect(result).not.toHaveProperty('drop');
+      expect([...h.files.entries()].filter(([p]) => p.endsWith(`/${BRIEF_PUSH_FILE}`)).map(([, v]) => v)).toEqual([BRIEF_PUSH_OFF]);
+    }
+  });
+
   it('a prompt a person did not type (Code Mode poll, SDK, schedule, unclassified) passes through untouched', async () => {
     const brief = `Task 3 of 6.\n${'x '.repeat(1500)}`;
     const inputs = [
       { text: brief, origin: { kind: 'composer' }, source: 'poll_event' },
       { text: 'is the css test complete?', origin: { kind: 'composer' }, source: 'poll_event' },
       { text: brief, origin: { kind: 'sdk' } },
+      { text: brief, source: 'sdk' },
+      { text: brief, source: 'system' },
+      { text: brief, source: 'loop_wakeup' },
+      { text: brief, source: 'schedule_wakeup' },
+      { text: brief, source: 'poll_event' },
+      { text: brief, origin: { kind: 'task-notification' } },
       { text: brief, origin: { kind: 'scheduled-trigger' } },
       { text: brief, origin: { kind: 'unclassified' } },
       { text: brief, origin: { kind: 'composer' }, isMeta: true },

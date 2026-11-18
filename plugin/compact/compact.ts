@@ -190,7 +190,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const cutOnNewBrief = optionBoolean(options, 'cutOnNewBrief', false);
     const captureBriefs = optionBoolean(options, 'recallEnabled', true) && optionBoolean(options, 'taskBriefs', true);
     // Only a prompt a person typed is a task, a rules adoption, a label or a push target: not Code Mode output or Poll,
-    // a task notification, a subagent report (origin peer, `handback`), an SDK run or a schedule (core/prompt-source.ts).
+    // a task notification, a subagent report (origin peer), an SDK run or a schedule (core/prompt-source.ts, fail-open:
+    // only an explicit non-user source, a non-composer/bridge origin.kind or isMeta is skipped).
     const typedByUser = isRealUserPrompt(input);
     const eligibleBriefOrigin = typedByUser && typeof input.text === 'string';
     const incomingBrief = eligibleBriefOrigin && (cutOnNewBrief || captureBriefs) ? briefText(input.text) : undefined;
