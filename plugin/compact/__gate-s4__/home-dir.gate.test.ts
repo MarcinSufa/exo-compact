@@ -103,7 +103,7 @@ function windowsHost(env: Record<string, string>) {
 describe('compact.ts resolves the home directory in one place (4.7.0)', () => {
   it('a brief save passes the recall root under USERPROFILE when HOME is unset', async () => {
     const h = windowsHost({ USERPROFILE: 'C:\\Users\\u' });
-    await (await hooks())['prompt.submit']!(h, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'sdk' } }, async (e) => e);
+    await (await hooks())['prompt.submit']!(h, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'composer' } }, async (e) => e);
     await new Promise((resolve) => setTimeout(resolve, 20));
     const save = h.runs.find((argv) => argv[1] === '/plugin/recall/brief.mjs');
     expect(save?.[3]).toBe('C:\\Users\\u/.claude/exovault/recall');
@@ -111,9 +111,9 @@ describe('compact.ts resolves the home directory in one place (4.7.0)', () => {
 
   it('falls back to HOMEDRIVE + HOMEPATH, then to .', async () => {
     const drive = windowsHost({ HOMEDRIVE: 'D:', HOMEPATH: '\\Users\\u' });
-    await (await hooks())['prompt.submit']!(drive, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'sdk' } }, async (e) => e);
+    await (await hooks())['prompt.submit']!(drive, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'composer' } }, async (e) => e);
     const none = windowsHost({});
-    await (await hooks())['prompt.submit']!(none, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'sdk' } }, async (e) => e);
+    await (await hooks())['prompt.submit']!(none, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'composer' } }, async (e) => e);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(drive.runs.find((argv) => argv[1] === '/plugin/recall/brief.mjs')?.[3]).toBe('D:\\Users\\u/.claude/exovault/recall');
     expect(none.runs.find((argv) => argv[1] === '/plugin/recall/brief.mjs')?.[3]).toBe('./.claude/exovault/recall');
