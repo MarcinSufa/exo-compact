@@ -199,7 +199,7 @@ describe('3.40.0 (S4zl) PreToolUse and prompt hooks', () => {
     expect(JSON.parse(h.runs[0]!.stdin!)).toEqual({ prompt: 'is the css test complete?' });
     expect(passed.context?.[0]).toContain('for this message');
     const h2 = host(BRIEF_PUSH_ARMED);
-    await (await hooks({ recallEnabled: true }))['prompt.submit']!(h2, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'sdk' } }, async (e) => e);
+    await (await hooks({ recallEnabled: true }))['prompt.submit']!(h2, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'composer' } }, async (e) => e);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect([...h2.files.entries()].filter(([p]) => p.endsWith(`/${BRIEF_PUSH_FILE}`)).map(([, v]) => v)).toEqual([BRIEF_PUSH_OFF]);
   });
@@ -215,12 +215,53 @@ describe('3.40.0 (S4zl) PreToolUse and prompt hooks', () => {
     }
   });
 
+  it('fail-open: a long prompt with no origin, an unknown source or source user is a new brief and turns the push off', async () => {
+    const brief = `Task 3 of 6.\n${'x '.repeat(1500)}`;
+    for (const input of [{ text: brief }, { text: brief, source: 'future_kind' }, { text: brief, source: 'user' }, { text: brief, origin: { kind: 'bridge' } }]) {
+      const h = host(BRIEF_PUSH_ARMED);
+      let passed: unknown;
+      const result = await (await hooks({ recallEnabled: true }))['prompt.submit']!(h, input as never, async (e) => { passed = e; return e; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(passed).toBe(input);
+      expect(result).not.toHaveProperty('drop');
+      expect([...h.files.entries()].filter(([p]) => p.endsWith(`/${BRIEF_PUSH_FILE}`)).map(([, v]) => v)).toEqual([BRIEF_PUSH_OFF]);
+    }
+  });
+
+  it('a prompt a person did not type (Code Mode poll, SDK, schedule, unclassified) passes through untouched', async () => {
+    const brief = `Task 3 of 6.\n${'x '.repeat(1500)}`;
+    const inputs = [
+      { text: brief, origin: { kind: 'composer' }, source: 'poll_event' },
+      { text: 'is the css test complete?', origin: { kind: 'composer' }, source: 'poll_event' },
+      { text: brief, origin: { kind: 'sdk' } },
+      { text: brief, source: 'sdk' },
+      { text: brief, source: 'system' },
+      { text: brief, source: 'loop_wakeup' },
+      { text: brief, source: 'schedule_wakeup' },
+      { text: brief, source: 'poll_event' },
+      { text: brief, origin: { kind: 'task-notification' } },
+      { text: brief, origin: { kind: 'scheduled-trigger' } },
+      { text: brief, origin: { kind: 'unclassified' } },
+      { text: brief, origin: { kind: 'composer' }, isMeta: true },
+    ];
+    for (const input of inputs) {
+      const h = host(BRIEF_PUSH_ARMED);
+      let passed: unknown;
+      const result = await (await hooks({ recallEnabled: true, cutOnNewBrief: true }))['prompt.submit']!(h, input as never, async (e) => { passed = e; return e; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(passed).toBe(input);
+      expect(result).not.toHaveProperty('drop');
+      expect(h.runs).toEqual([]);
+      expect([...h.files.entries()].filter(([p]) => p.endsWith(`/${BRIEF_PUSH_FILE}`)).map(([, v]) => v)).not.toContain(BRIEF_PUSH_OFF);
+    }
+  });
+
   // 4.1.0: with the task card on, the seed never shows the checklist (0 of 29 w61 cuts, 0 of 210 recorded seeds),
   // so the brief is saved without the `claude -p` call that wrote it (~$0.76 per 8-task chain).
   it('saves a brief with no checklist model while the task card is on, and with briefDigestModel when it is off', async () => {
     const saveModel = async (options: Record<string, unknown>) => {
       const h = host(null);
-      await (await hooks({ recallEnabled: true, ...options }))['prompt.submit']!(h, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'sdk' } }, async (e) => e);
+      await (await hooks({ recallEnabled: true, ...options }))['prompt.submit']!(h, { text: `Task 3 of 6.\n${'x '.repeat(1500)}`, origin: { kind: 'composer' } }, async (e) => e);
       await new Promise((resolve) => setTimeout(resolve, 20));
       const save = h.runs.find((run) => run.argv[1] === '/plugin/recall/brief.mjs');
       expect(save?.argv[2]).toBe('save');

@@ -142,7 +142,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};
-    await on['prompt.submit']!(h, { text, origin: { kind: 'sdk' } }, async (e) => { passed = e as never; return e; });
+    await on['prompt.submit']!(h, { text, origin: { kind: 'composer' } }, async (e) => { passed = e as never; return e; });
     return { runs: runs.filter((r) => r.argv[1]?.endsWith('session-push.mjs')), logs, context: passed.context, fetches };
   }
 
@@ -190,7 +190,7 @@ describe('3.42.0 (S4zn) note and hook', () => {
       ui: { log: (line: string) => { logs.push(line); } },
     };
     let passed: { context?: string[] } = {};
-    await on['prompt.submit']!(h, { text: 'Is pg-745a still the staging database?', origin: { kind: 'sdk' } }, async (event) => { passed = event as never; return event; });
+    await on['prompt.submit']!(h, { text: 'Is pg-745a still the staging database?', origin: { kind: 'composer' } }, async (event) => { passed = event as never; return event; });
     return { logs, context: passed.context, fetches };
   }
 

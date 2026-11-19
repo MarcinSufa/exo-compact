@@ -6,6 +6,7 @@ import { demoteHeadings } from './core/seed.js';
 import { cleanCapturedRecord, contentIdentity, isSecretLikePath, reconcile, redactCapturedText, redactHostPath, WATERMARK_SEQUENCE_LENGTH } from './core/extractor.js';
 import { applyForceTriggerOverride, forceTriggerOverride, routeTrigger, withFallback, withTimeout } from './core/handler.js';
 import { briefText, condenseUserHistory, historyOmittedNote } from './core/history.js';
+import { isRealUserPrompt } from './core/prompt-source.js';
 import { ADOPTED_BUDGET_TOKENS, ADOPTED_MAX_CHARS, addAdopted, adoptedFileRefs, parseAdoptedIndex, renderAdoptedFiles, resolveAdoptedPath, revokedAdopted, revokedNames } from './core/adopted.js';
 import type { AdoptedEntry } from './core/adopted.js';
 import { BRIEF_BUDGET_TOKENS, BRIEF_FULL_MAX_CHARS, BRIEF_HEAD_CHARS, BRIEF_MIN_CHARS, BRIEF_MIN_TAIL_SHARE, parseBriefIndex, renderTaskBriefs } from './core/briefs.js';
@@ -188,8 +189,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // below then passes this new text through unchanged, whole.
     const cutOnNewBrief = optionBoolean(options, 'cutOnNewBrief', false);
     const captureBriefs = optionBoolean(options, 'recallEnabled', true) && optionBoolean(options, 'taskBriefs', true);
-    // A subagent's report to this session (origin peer, `handback` as the transcript records it) is not a task either.
-    const eligibleBriefOrigin = input.origin?.kind !== 'task-notification' && (input.origin as { handback?: unknown } | undefined)?.handback !== true && typeof input.text === 'string';
+    // Only a prompt a person typed is a task, a rules adoption, a label or a push target: not Code Mode output or Poll,
+    // a task notification, a subagent report (origin peer), an SDK run or a schedule (core/prompt-source.ts, fail-open:
+    // only an explicit non-user source, a non-composer/bridge origin.kind or isMeta is skipped).
+    const typedByUser = isRealUserPrompt(input);
+    const eligibleBriefOrigin = typedByUser && typeof input.text === 'string';
     const incomingBrief = eligibleBriefOrigin && (cutOnNewBrief || captureBriefs) ? briefText(input.text) : undefined;
     if (cutOnNewBrief && incomingBrief !== undefined && incomingBrief.length >= BRIEF_MIN_CHARS) {
       // Only a submit that is itself a cut candidate consumes the flag; a short `ok` typed in the retry window leaves it.
@@ -334,8 +338,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // 3.34.0: a rules file a person's request adopts is copied now, while it exists, whatever tool the model reads it
     // with later, and every seed quotes the copy (core/adopted.ts). Another session, a schedule or a relay never adopts.
     // The work is queued on one chain in prompt order and not awaited here.
-    const adoptOrigin = input.origin?.kind === 'composer' || input.origin?.kind === 'bridge' || input.origin?.kind === 'sdk';
-    const adoptText = adoptOrigin && typeof input.text === 'string' && optionBoolean(options, 'adoptedFiles', true) ? briefText(input.text) : undefined;
+    const adoptText = typedByUser && typeof input.text === 'string' && optionBoolean(options, 'adoptedFiles', true) ? briefText(input.text) : undefined;
     const adoptedRefs = adoptText === undefined ? [] : adoptedFileRefs(adoptText);
     if (adoptText !== undefined && (adoptedRefs.length || revokedNames(adoptText).length)) {
       const write = adoptedChain.then(async () => {
@@ -375,7 +378,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Only what a person typed (terminal or Remote Control) is labelled; `origin` is always set.
     // Skips are silent: `$.ui.log` draws a transcript line, and a line on every prompt of every
     // project is noise. Only an attempted request that failed is logged (review of 3.14.0, 1-2).
-    const human = input.origin?.kind === 'composer' || input.origin?.kind === 'bridge';
+    const human = typedByUser;
     const captured = capturedUserText(input.text);
     const key = human ? submitLabelKey(input.text, sha256) : undefined;
     const logLabel = (status: string): void => { notice(`labels.jev=${status}`); };
@@ -436,7 +439,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       });
     }
     // 3.40.0 (CONTRACT S4zl): a short message after a cut gets the brief lines for its words, like a write does.
-    const pushText = typeof input.text === 'string' && input.origin?.kind !== 'task-notification' ? briefText(input.text) : undefined;
+    const pushText = typeof input.text === 'string' && typedByUser ? briefText(input.text) : undefined;
     const briefPushOn = pushText !== undefined && pushText.length < BRIEF_MIN_CHARS && optionBoolean(options, 'briefPush', false);
     // 3.42.0 (CONTRACT S4zn): any message after a cut also gets the compacted-away session lines for its rare terms.
     // 3.43.0: on by default (ctxbench Haiku: 33/39 without it, 37/39 with it, ~1.2k tokens over 125 turns).
