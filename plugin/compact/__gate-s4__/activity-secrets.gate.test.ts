@@ -70,6 +70,14 @@ describe('tool activity keeps no secrets', () => {
     expect(isSecretLikePath(filePath)).toBe(false);
   });
 
+  it.each(['api_token.env', 'prod.env', 'config/access_token.txt', 'my-tokens.json', 'credentials.json', 'secrets.yaml', '.npmrc', 'id_rsa'])('%s is secret-looking: any *.env file and any token file with a prefix ending in a separator', (filePath) => {
+    expect(isSecretLikePath(filePath)).toBe(true);
+  });
+
+  it.each(['src/env.ts', 'environment.md', 'tokenizer.json', 'token-budget.ts', 'src/budget-tokens.ts'])('%s is not secret-looking: a token or env name only counts with a data extension', (filePath) => {
+    expect(isSecretLikePath(filePath)).toBe(false);
+  });
+
   it('NotebookEdit reads notebook_path and new_source, and denies secret paths', () => {
     expect(activityFor('NotebookEdit', { notebook_path: 'nb/analysis.ipynb', new_source: 'def load_frames(path):\n    return path' }).text).toBe('edit nb/analysis.ipynb: load_frames');
     expect(activityFor('NotebookEdit', { notebook_path: '/home/u/.aws/nb.ipynb', new_source: 'def leak(): pass' }).text).toBe('edit /home/u/.aws/nb.ipynb');

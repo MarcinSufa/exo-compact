@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { register } from '../compact.js';
 import { estimateTokens, serializedTokens } from '../core/budgets.js';
 import { BRIEF_CHECK_FILE } from '../core/brief-check.js';
-import { CARD_TOTAL_BUDGET_TOKENS, TASK_CARD_BRIEF_FILE, TASK_CARD_FILE, TASK_CARD_STATE_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardPrompt, renderCardSection } from '../core/task-card.js';
+import { CARD_TOTAL_BUDGET_TOKENS, TASK_CARD_BRIEF_FILE, TASK_CARD_FILE, TASK_CARD_STATE_FILE, cardAcceptance, cardRefreshDue, parseCardReply, parseTaskCardState, renderCardPrompt, renderCardSection, renderCardThreads } from '../core/task-card.js';
+import { foldWorkState } from '../core/work-state.js';
 import { sha256 } from '../host/sha256.js';
 import { assistantText, fakeHost, humanPrompt, withStrippedRuntimeGlobals, LEGACY_OPTIONS } from './fixtures/helpers.js';
 import type { SessionMessage } from '../core/types.js';
@@ -24,6 +25,70 @@ const CARD = [
   '## Next step',
   'Write test/r12-lane-fit.test.ts.',
 ].join('\n');
+
+describe('card threads: Open threads and Artifacts from the work state', () => {
+  it('renders nothing when the work state has neither', () => {
+    expect(renderCardThreads(foldWorkState([{ type: 'branch', name: 'main', created: false }], '/p'))).toBe('');
+  });
+
+  it('lists what is still open and what was made, newest first, each once', () => {
+    const state = foldWorkState([
+      { type: 'pr', url: 'https://github.com/o/r/pull/13' },
+      { type: 'push', branch: 'feat/x' },
+      { type: 'commit', branch: 'feat/x', sha: 'abc1234', subject: 'feat: panel' },
+      { type: 'commit', branch: 'feat/x', sha: 'def5678', subject: 'test: panel spec' },
+      { type: 'pr', url: 'https://github.com/o/r/pull/14' },
+      { type: 'push', branch: 'feat/x' },
+      { type: 'bg_start', id: 'a1', via: 'agent', label: 'review slice 1' },
+      { type: 'bg_start', id: 'bk7', via: 'bash', label: 'dev server' },
+      { type: 'bg_end', id: 'a1', status: 'completed' },
+      { type: 'task', id: '3', subject: 'Wire the panel', status: 'in_progress' },
+      { type: 'task', id: '4', subject: 'Old step', status: 'completed' },
+      { type: 'todos', items: [{ content: 'Write the e2e spec', status: 'pending' }, { content: 'Read the brief', status: 'completed' }] },
+      { type: 'file_write', path: '/p/src/a.ts' },
+      { type: 'file_write', path: '/p/src/b.ts' },
+      { type: 'file_write', path: '/p/src/a.ts' },
+    ], '/p');
+    expect(renderCardThreads(state)).toBe([
+      '## Open threads',
+      '- PR https://github.com/o/r/pull/14',
+      '- PR https://github.com/o/r/pull/13',
+      '- background bash bk7 "dev server"',
+      '- task #3 [in_progress] Wire the panel',
+      '- todo [pending] Write the e2e spec',
+      '## Artifacts',
+      '- PR https://github.com/o/r/pull/14',
+      '- PR https://github.com/o/r/pull/13',
+      '- pushed feat/x in /p',
+      '- commit def5678 test: panel spec',
+      '- commit abc1234 feat: panel',
+      '- file /p/src/a.ts',
+      '- file /p/src/b.ts',
+    ].join('\n'));
+  });
+
+  it('reads open tasks only up to the cap, so a long session builds no long list', () => {
+    const state = foldWorkState([], '/p');
+    let pulled = 0;
+    const values = function* () { for (let i = 0; i < 5000; i += 1) { pulled += 1; yield { id: String(i), status: 'pending' }; } };
+    state.tasks = { values } as unknown as typeof state.tasks;
+    const open = renderCardThreads(state).split('\n').slice(1);
+    expect(open).toHaveLength(10);
+    expect(pulled).toBeLessThanOrEqual(11);
+  });
+
+  it('leaves out a section with no items and caps each list', () => {
+    const files = Array.from({ length: 10 }, (_, i) => ({ type: 'file_write' as const, path: `/p/f${i}.ts` }));
+    const prs = Array.from({ length: 5 }, (_, i) => ({ type: 'pr' as const, url: `https://github.com/o/r/pull/${i}` }));
+    const threads = renderCardThreads(foldWorkState([...prs, ...files, { type: 'task', id: '1', subject: 'done', status: 'completed' }], '/p'));
+    const artifacts = threads.slice(threads.indexOf('## Artifacts\n')).split('\n').slice(1);
+    expect(artifacts).toHaveLength(12);
+    expect(artifacts[0]).toBe('- PR https://github.com/o/r/pull/4');
+    expect(artifacts.at(-1)).toBe('- file /p/f3.ts');
+    expect(renderCardThreads(foldWorkState(files, '/p'))).not.toContain('## Open threads');
+    expect(renderCardThreads(foldWorkState([{ type: 'task', id: '9', subject: 'Ship it', status: 'pending' }], '/p'))).toBe('## Open threads\n- task #9 [pending] Ship it');
+  });
+});
 
 describe('3.49.0 task card schedule', () => {
   it('waits until the context holds 60% of the compaction window', () => {

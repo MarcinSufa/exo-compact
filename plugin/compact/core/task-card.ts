@@ -9,6 +9,7 @@
  */
 import type { Budgets } from './budgets.js';
 import type { TokenCounter } from './types.js';
+import type { WorkState } from './work-state.js';
 
 export const TASK_CARD_FILE = 'task-card.md';
 export const TASK_CARD_STATE_FILE = 'task-card.json';
@@ -56,6 +57,10 @@ export function stretchForTail(budgets: Budgets, tailTokens: number): Budgets {
 
 export const CARD_HEADING = '# Task card';
 export const CARD_ACCEPTANCE_HEADING = '## Acceptance checks';
+export const CARD_OPEN_THREADS_HEADING = '## Open threads';
+export const CARD_ARTIFACTS_HEADING = '## Artifacts';
+export const CARD_OPEN_THREADS_MAX = 10;
+export const CARD_ARTIFACTS_MAX = 12;
 
 export interface TaskCardState {
   /** Context tokens when the last refresh started; a lower reading later means a cut happened. */
@@ -98,6 +103,42 @@ export function cardRefreshDue(state: TaskCardState, tokens: number, windowToken
   const nearCut = !current.stretchDone && tokens >= windowTokens * CARD_CUT_SHARE;
   if (!newTask && !nearCut) return { due: false, state: current };
   return { due: true, state: { lastTokens: tokens, refreshes: current.refreshes + 1, stretchDone: true, ...(briefId !== undefined ? { briefId } : current.briefId !== undefined ? { briefId: current.briefId } : {}) } };
+}
+
+/**
+ * The card's Open threads and Artifacts, built from the work state at the cut, not by the model: open PRs, background
+ * jobs with no completion seen and tasks not done; PRs, pushes, commits and files written, newest first. A section with
+ * no items is left out; '' when both are empty.
+ */
+export function renderCardThreads(state: WorkState): string {
+  const done = (status: string | undefined) => status === 'completed' || status === 'done';
+  const newest = <T>(items: readonly T[], max: number): T[] => items.slice(-max).reverse();
+  const firstOpen = <T extends { status?: string }>(items: Iterable<T>, max: number): T[] => {
+    const kept: T[] = [];
+    for (const item of items) {
+      if (kept.length >= max) break;
+      if (!done(item.status)) kept.push(item);
+    }
+    return kept;
+  };
+  const prs = newest(state.prs, CARD_ARTIFACTS_MAX).map((url) => `- PR ${url}`);
+  const open = [
+    ...prs,
+    ...newest(state.backgrounds.filter((job) => !job.status), CARD_OPEN_THREADS_MAX).map((job) => `- background ${job.via} ${job.id} "${job.label}"`),
+    ...firstOpen(state.tasks.values(), CARD_OPEN_THREADS_MAX).map((task) => `- task #${task.id} [${task.status ?? 'pending'}]${task.subject ? ` ${task.subject}` : ''}`),
+    ...firstOpen(state.todos, CARD_OPEN_THREADS_MAX).map((todo) => `- todo [${todo.status}] ${todo.content}`),
+  ];
+  const artifacts = [
+    ...prs,
+    ...newest(state.pushes, CARD_ARTIFACTS_MAX).map((push) => `- pushed ${push.branch} in ${push.repo}`),
+    ...newest(state.commits, CARD_ARTIFACTS_MAX).map((commit) => `- commit ${commit.sha} ${commit.subject}`),
+    ...newest(state.files, CARD_ARTIFACTS_MAX).map((path) => `- file ${path}`),
+  ];
+  const section = (heading: string, lines: string[], max: number) => {
+    const kept = [...new Set(lines)].slice(0, max);
+    return kept.length ? [heading, ...kept].join('\n') : '';
+  };
+  return [section(CARD_OPEN_THREADS_HEADING, open, CARD_OPEN_THREADS_MAX), section(CARD_ARTIFACTS_HEADING, artifacts, CARD_ARTIFACTS_MAX)].filter(Boolean).join('\n');
 }
 
 /** The one message the fork answers. The current card, when there is one, is carried forward. */
@@ -171,8 +212,9 @@ export function capCard(text: string, countTokens: TokenCounter, maxTokens: numb
     else if (sections.length === 0) head.push(line);
     else sections.at(-1)!.body.push(line);
   }
+  if (sections.some(({ heading }) => DERIVED_HEADING.test(heading))) return capDerivedFirst(head, sections, countTokens, maxTokens, fullPath);
   if (sections.length < 2) return cutAtLine(lines, countTokens, maxTokens, fullPath);
-  const at = (limit: number) => [...head, ...sections.flatMap(({ heading, body }) => {
+  const at =(limit: number) => [...head, ...sections.flatMap(({ heading, body }) => {
     const kept = body.slice(0, limit);
     const left = body.slice(limit).filter((line) => line.trim()).length;
     return left > 0 ? [heading, ...kept, moreMarker(left, fullPath)] : [heading, ...kept];
@@ -186,6 +228,29 @@ export function capCard(text: string, countTokens: TokenCounter, maxTokens: numb
   }
   if (low >= 1) return at(low);
   return headingsCard(head, sections, countTokens, maxTokens, fullPath) ?? cutAtLine(lines, countTokens, maxTokens, fullPath);
+}
+
+const DERIVED_HEADING = /^#{2,3} (?:Open threads|Artifacts)$/;
+
+/** S5y: Open threads and Artifacts give way first; the model's sections are capped only if they alone are over. */
+function capDerivedFirst(head: string[], sections: { heading: string; body: string[] }[], countTokens: TokenCounter, maxTokens: number, fullPath: string | undefined): string {
+  // The derived lines are not in the card file, so their marker names no path.
+  const at = (limit: number) => [...head, ...sections.flatMap(({ heading, body }) => {
+    if (!DERIVED_HEADING.test(heading)) return [heading, ...body];
+    if (limit === 0) return [];
+    const left = body.slice(limit).filter((line) => line.trim()).length;
+    return left > 0 ? [heading, ...body.slice(0, limit), moreMarker(left, undefined)] : [heading, ...body.slice(0, limit)];
+  })].join('\n');
+  const model = at(0);
+  if (countTokens(model) > maxTokens) return capCard(model, countTokens, maxTokens, fullPath);
+  let low = 0;
+  let high = Math.max(...sections.filter(({ heading }) => DERIVED_HEADING.test(heading)).map(({ body }) => body.length));
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (countTokens(at(mid)) <= maxTokens) low = mid;
+    else high = mid - 1;
+  }
+  return at(low);
 }
 
 const MIN_FIRST_LINE_CHARS = 24;

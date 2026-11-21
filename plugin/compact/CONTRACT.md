@@ -3619,3 +3619,33 @@ or CPU architecture, whose onnxruntime binaries `prune` removed for every platfo
 `socketPath` names a Windows pipe `\\.\pipe\exo-recall-<session prefix>-<instance>-<32 hex random>`; Unix sockets keep
 `<socketDir>/<prefix>-<instance>.sock` in the owner-only socket directory. Gates: recall-vectors, "4.9.2: the vectors
 runtime is pinned"; session-push, "4.9.2: a Windows pipe name cannot be guessed".
+
+### S5y: Open threads and Artifacts on the card, from the work state
+
+The card the model writes says what is done and what comes next, but not which threads it left open or which outputs a
+successor needs, and the model drops those first when it runs short. At a cut, `renderCardThreads` (`core/task-card.ts`)
+builds two sections from the folded work state (S4q), not from the model, and the cut appends them to the card after
+Next step. The fork prompt, the card file and the stop-time check are unchanged.
+
+- `## Open threads`: every PR URL seen (the merge state is not checked: no network), background jobs started with no
+  completion seen (`- background <bash|agent> <id> "<label>"`), tasks and todos not completed or done. PRs and jobs
+  newest first, tasks and todos in their own order. At most `CARD_OPEN_THREADS_MAX` (10) lines.
+- `## Artifacts`: PR URLs, pushed branches (`- pushed <branch> in <repo>`), commits (`- commit <sha> <subject>`) and
+  files written (`- file <path>`), each kind newest first, each line once, at most `CARD_ARTIFACTS_MAX` (12) lines.
+- A section with no items is left out; with both empty, or the card or `workState` off, the card is as written.
+- Files written: a new work event `{ type: 'file_write', path }` for each `Write`, `Edit`, `MultiEdit` and
+  `NotebookEdit` call whose tool result came back without an error (`file_path`, else `notebook_path`), skipped for a secret-like
+  path (`isSecretLikePath`, which also counts any `*.env` file and a token file with a prefix, such as `api_token.env`).
+  `WorkState.files` keeps the newest 10, each path once. It is an `s4-capture` record like every work event, so it
+  stays in the local capture store and never leaves the machine (sync exclusion above). The Work state section does not
+  print it.
+- Over the card cap, `capCard` trims Open threads and Artifacts first (the same number of lines each, then a
+  `(n more lines cut)` marker, then both left out), and the model's sections stay byte-identical while they fit alone.
+  Only when the model's sections are over the cap by themselves are the two dropped and the rest capped as before.
+- Over the seed budget, after the working notes have shrunk and before the recipes do, the card is put back without
+  both sections (`seed.card_threads_dropped=1`). `renderSeed` emptying its own sections to fit (`overflowed`) counts as
+  over budget there.
+
+Gate tests: task-card, "card threads"; work-state, "card threads: files written"; card-cap, "drops the work-state
+sections"; fresh-card-recipes-wiring, "card threads in the seed" and "keeps the recipes whole"; activity-secrets,
+"is secret-looking".

@@ -17,7 +17,8 @@ export type WorkEvent =
   | { type: 'bg_start'; id?: string; tool_use_id?: string; via: 'bash' | 'agent'; label: string }
   | { type: 'bg_end'; id: string; status: string; summary?: string }
   | { type: 'todos'; items: Array<{ content: string; status: string }> }
-  | { type: 'task'; id: string; subject?: string; status?: string };
+  | { type: 'task'; id: string; subject?: string; status?: string }
+  | { type: 'file_write'; path: string };
 
 export interface WorkState {
   sessionCwd: string;
@@ -31,6 +32,8 @@ export interface WorkState {
   todos: Array<{ content: string; status: string }>;
   tasks: Map<string, { id: string; subject?: string; status?: string }>;
   backgrounds: Array<{ id: string; via: 'bash' | 'agent'; label: string; status?: string; summary?: string }>;
+  /** Paths written by Write, Edit, MultiEdit and NotebookEdit, newest last. */
+  files: string[];
 }
 
 export interface WorkStateProbe {
@@ -45,6 +48,7 @@ const URL_CREDENTIALS = /(https?:\/\/)(?:[^\s/@]+@)/gi;
 const PR_URL = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+/g;
 const CLONE_OPTIONS_WITH_VALUES = new Set(['-b', '--branch', '-o', '--origin', '-c', '--config', '--depth', '--shallow-since', '--shallow-exclude', '--reference', '--reference-if-able', '--separate-git-dir', '--upload-pack', '--filter', '--server-option', '--bundle-uri', '--revision', '--template', '--jobs', '-j']);
 const PUSH_OPTIONS_WITH_VALUES = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']);
+const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const PUSH_FLAGS = new Set(['-u', '--set-upstream', '-f', '--force', '--tags', '-n', '--dry-run', '--no-verify']);
 
 function clean(value: string): string {
@@ -271,6 +275,7 @@ function commandEvents(command: string, parsed: readonly ShellCommand[]): WorkEv
 function resultEvents(messages: readonly SessionMessage[]): Map<number, WorkEvent[]> {
   const byId = new Map<string, { messageIndex: number; tool: string; input: Record<string, unknown> }>();
   const resultById = new Map<string, string>();
+  const succeeded = new Set<string>();
   const commandSegmentsById = new Map<string, ShellCommand[]>();
   messages.forEach((message, messageIndex) => {
     if (isSeedMessage(message)) return;
@@ -279,7 +284,7 @@ function resultEvents(messages: readonly SessionMessage[]): Map<number, WorkEven
       byId.set(use.tool_use_id, { messageIndex, tool: use.tool, input });
       if (use.tool === 'Bash' && typeof input.command === 'string' && input.command.length <= MAX_COMMAND && !shouldSkipToolOutput(input.command)) commandSegmentsById.set(use.tool_use_id, shellCommands(input.command));
     });
-    for (const result of message.toolResults ?? []) if (!resultById.has(result.tool_use_id)) resultById.set(result.tool_use_id, result.text);
+    for (const result of message.toolResults ?? []) if (!resultById.has(result.tool_use_id)) { resultById.set(result.tool_use_id, result.text); if (result.isError !== true) succeeded.add(result.tool_use_id); }
   });
   const out = new Map<number, WorkEvent[]>();
   const add = (index: number, event: WorkEvent): void => { const events = out.get(index); if (events) events.push(event); else out.set(index, [event]); };
@@ -296,6 +301,8 @@ function resultEvents(messages: readonly SessionMessage[]): Map<number, WorkEven
         }
       }
       if (use.tool === 'EnterWorktree' || use.tool === 'ExitWorktree') add(messageIndex, { type: 'cwd_unknown' });
+      const written = FILE_WRITE_TOOLS.has(use.tool) && succeeded.has(use.tool_use_id) ? input.file_path ?? input.notebook_path : undefined;
+      if (typeof written === 'string' && written && !isSecretLikePath(written)) add(messageIndex, { type: 'file_write', path: cleanLine(written) });
       if (use.tool === 'Agent' || use.tool === 'Task') {
         const text = resultById.get(use.tool_use_id) ?? '';
         const id = /agentId:\s*([A-Za-z0-9_-]+)/.exec(text)?.[1];
@@ -400,7 +407,7 @@ function resolvePath(value: string, cwd: string): string {
 }
 
 export function foldWorkState(events: readonly WorkEvent[], sessionCwd: string): WorkState {
-  const state: WorkState = { sessionCwd, directory: sessionCwd, worktrees: [], clones: [], branches: [], pushes: [], commits: [], prs: [], todos: [], tasks: new Map(), backgrounds: [] };
+  const state: WorkState = { sessionCwd, directory: sessionCwd, worktrees: [], clones: [], branches: [], pushes: [], commits: [], prs: [], todos: [], tasks: new Map(), backgrounds: [], files: [] };
   let directoryKnown = true;
   let sawSnapshot = false;
   for (const event of events) {
@@ -432,6 +439,7 @@ export function foldWorkState(events: readonly WorkEvent[], sessionCwd: string):
     else if (event.type === 'push') { if (directoryKnown || event.repo?.startsWith('/')) state.pushes.push({ branch: event.branch, repo: event.repo ? resolvePath(event.repo, directoryKnown ? state.directory : sessionCwd) : state.directory }); }
     else if (event.type === 'commit') { state.commits.push(event); state.commits = state.commits.slice(-3); }
     else if (event.type === 'pr') { state.prs = [...state.prs.filter((url) => url !== event.url), event.url].slice(-5); }
+    else if (event.type === 'file_write') { state.files = [...state.files.filter((path) => path !== event.path), event.path].slice(-FILES_KEPT); }
     else if (event.type === 'todos') state.todos = event.items;
     else if (event.type === 'task') {
       const prior = state.tasks.get(event.id);
@@ -452,6 +460,7 @@ export function foldWorkState(events: readonly WorkEvent[], sessionCwd: string):
 const BACKGROUND_KEPT = 12;
 const BACKGROUND_SHOWN_STARTED = 4;
 const BACKGROUND_SHOWN_FINISHED = 3;
+const FILES_KEPT = 10;
 
 function neutralize(text: string): string {
   return text.replace(/(?:<|\uFF1C|\uFE64|&lt;|&#0*60;|&#x0*3c;)(\/?[A-Za-z][\w-]*)/gi, '‹$1');
@@ -563,7 +572,7 @@ export function validWorkEvent(value: unknown): value is WorkEvent {
   const stringFields: Record<string, string[]> = {
     cwd_snapshot: ['path'], cd: ['path'], worktree_add: ['path'], worktree_remove: ['path'], clone: ['url'],
     branch: ['name'], push: ['branch'], commit: ['branch', 'sha', 'subject'], pr: ['url'],
-    bg_start: ['via', 'label'], bg_end: ['id', 'status'], task: ['id'], cwd_unknown: [],
+    bg_start: ['via', 'label'], bg_end: ['id', 'status'], task: ['id'], file_write: ['path'], cwd_unknown: [],
   };
   if (event.type === 'todos') return Array.isArray(event.items) && event.items.every((item) => !!item && typeof item === 'object' && typeof (item as Record<string, unknown>).content === 'string' && typeof (item as Record<string, unknown>).status === 'string');
   const required = stringFields[String(event.type)];

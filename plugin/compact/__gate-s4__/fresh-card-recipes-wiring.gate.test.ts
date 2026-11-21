@@ -223,6 +223,10 @@ describe('4.7.1 (S5k) the recipes give way after the working notes', () => {
     expect(roomy.lines.some(isDenseShrink) || roomy.lines.some(isRecipesShrink), roomy.lines.join(' | ')).toBe(false);
     expect(tight.lines.some(isDenseShrink), tight.lines.join(' | ')).toBe(true);
     expect(tight.lines.some(isRecipesShrink), tight.lines.join(' | ')).toBe(false);
+    expect(roomy.seed).toContain('### Open threads');
+    expect(tight.lines, tight.lines.join(' | ')).toContain('seed.card_threads_dropped=1');
+    expect(tight.seed).not.toContain('### Open threads');
+    expect(tight.seed).not.toContain('### Artifacts');
     expect(tight.lines.filter((line) => OTHERS.some((prefix) => line.startsWith(prefix)))).toEqual([]);
     expect(recipeCount(tight.lines)).toBe(recipeCount(roomy.lines));
     expect(sectionBody(tight.seed, RECIPES_HEADING)).toBe(sectionBody(roomy.seed, RECIPES_HEADING));
@@ -241,7 +245,10 @@ describe('4.7.1 (S5k) the recipes give way after the working notes', () => {
     expect(firstRecipes, tight.lines.join(' | ')).toBeGreaterThan(lastDense);
     expect(recipeCount(tight.lines)).toBeLessThan(recipeCount(roomy.lines));
     expect(tight.lines.filter((line) => OTHERS.some((prefix) => line.startsWith(prefix)))).toEqual([]);
-    expect(sectionBody(tight.seed, 'Task card')).toBe(sectionBody(roomy.seed, 'Task card'));
+    expect(indexOf(tight.lines, (line) => line === 'seed.card_threads_dropped=1')).toBeGreaterThan(lastDense);
+    expect(firstRecipes).toBeGreaterThan(indexOf(tight.lines, (line) => line === 'seed.card_threads_dropped=1'));
+    const roomyCard = sectionBody(roomy.seed, 'Task card')!;
+    expect(sectionBody(tight.seed, 'Task card')).toBe(roomyCard.slice(0, roomyCard.indexOf('\n### Open threads')));
     expect(sectionBody(tight.seed, 'Since the card')).toBe(sectionBody(roomy.seed, 'Since the card'));
     expect(tight.next).not.toHaveBeenCalled();
   });
@@ -389,5 +396,22 @@ describe('4.7.0 the options are declared (recipes default on since 4.7.2)', () =
       expect(manifest.userConfig?.[name]?.type).toBe('boolean');
       expect(manifest.userConfig?.[name]?.default).toBe(name === 'recipes');
     }
+  });
+});
+
+describe('card threads in the seed', () => {
+  it('appends Open threads and Artifacts from the captured work state to the card, one level down', async () => {
+    const { next, seed } = await cut({}, { memoryFs: true });
+    expect(next).not.toHaveBeenCalled();
+    const card = seed.slice(seed.indexOf('## Task card'));
+    expect(card).toContain('### Next step\nWrite the model file.\n### Open threads\n- background bash bk7m2x9 ');
+    expect(card).toMatch(/### Artifacts\n- file src\/model\.ts\n- file src\/horizon\.ts\n- file src\/before\.ts/);
+  });
+
+  it('leaves the card as written when the work state is off', async () => {
+    const { seed } = await cut({ workState: false }, { memoryFs: true });
+    expect(seed).toContain('### Next step\nWrite the model file.');
+    expect(seed).not.toContain('### Open threads');
+    expect(seed).not.toContain('### Artifacts');
   });
 });
